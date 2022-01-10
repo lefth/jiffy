@@ -1,0 +1,4 @@
+1
+00:00:0,100 --> 00:00:27,111
+This subtitle is UTF-8. Some currency symbols: £¥₿₤. And it is a somewhat long line.
+
