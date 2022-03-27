@@ -11,7 +11,6 @@ use std::{
         Arc,
     },
     time::Duration,
-    u128,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -19,7 +18,6 @@ use clap::Parser;
 use futures::stream::{FuturesUnordered, StreamExt};
 use globset::{Glob, GlobSetBuilder};
 use log::warn;
-use rand::Rng;
 use regex::Regex;
 
 pub const ENCODE_DIR: &str = "encoded";
@@ -387,9 +385,6 @@ async fn encode_video(
             // And don't include the existing soft subs:
             child_args.push("-sn".into());
         } else if let Some(sub_path) = try_find_subs(input)? {
-            // NOTE: in my testing, converting .srt to .ass gives a smaller rendered text that looks better:
-            let sub_path = convert_ass(&sub_path).await?;
-
             let sub_path = sub_path
                 .to_str()
                 .context("Could not convert subtitle name to utf-8.")?
@@ -562,14 +557,7 @@ async fn encode_video(
     Ok(())
 }
 
-/// Convert SRT to ASS (though it would actually work to convert any video file with a subtitle stream to ASS.)
-async fn convert_ass(sub_path: &PathBuf) -> Result<PathBuf> {
-    let converted_sub_path =
-        std::env::temp_dir().join(format!("tmp-sub-{}.ass", rand::thread_rng().gen::<u128>()));
-    dump_stream(&sub_path, &converted_sub_path, false).await?;
-    Ok(converted_sub_path)
-}
-
+#[allow(dead_code)]
 /// Use ffmpeg to convert one path to another path, optionally with the `-c copy` option.
 async fn dump_stream(input_path: &Path, output_path: &Path, copy: bool) -> Result<()> {
     let mut cmd = Command::new(find_executable(Executable::FFMPEG)?);
