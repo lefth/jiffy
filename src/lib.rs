@@ -427,21 +427,6 @@ async fn encode_video(
     });
     child_args.push(OsString::from(&args.preset));
 
-    child_args.extend(args.get_extra_flags()?.iter().map(|s| s.into()));
-    match env::var("FFMPEG_FLAGS") {
-        Ok(env_args) => {
-            child_args.extend(env_args.to_string().split_whitespace().map(|s| s.into()));
-        }
-        Err(env::VarError::NotPresent) => {}
-        Err(err) => {
-            _warn!(
-                input,
-                "Could not get extra ffmpeg args from FFMPEG_FLAGS: {}",
-                err,
-            );
-        }
-    }
-
     let max_height = args.get_height();
     // This -vf argument string was pretty thoroughly tested: it makes the shorter dimension equivalent to
     // the desired height (or width for portrait mode), without changing the aspect ratio, and without upscaling.
@@ -488,6 +473,21 @@ async fn encode_video(
     // Add other args specific to this filename
     if let Some(env_ffmpeg_args) = input.env_ffmpeg_args()? {
         child_args.extend(env_ffmpeg_args.split_whitespace().map(OsString::from));
+    }
+
+    child_args.extend(args.get_extra_flags()?.iter().map(|s| s.into()));
+    match env::var("FFMPEG_FLAGS") {
+        Ok(env_args) => {
+            child_args.extend(env_args.to_string().split_whitespace().map(|s| s.into()));
+        }
+        Err(env::VarError::NotPresent) => {}
+        Err(err) => {
+            _warn!(
+                input,
+                "Could not get extra ffmpeg args from FFMPEG_FLAGS: {}",
+                err,
+            );
+        }
     }
 
     child_args.extend(os_args![&output_fname]);
