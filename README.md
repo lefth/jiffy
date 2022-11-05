@@ -33,7 +33,7 @@ OPTIONS:
                                      from the video encode root. For example, "*S01*/*E01*" might be
                                      used to skip the first episode of a TV show, and "**/*E01*"
                                      would skip the first episode of each season. This argument must
-                                     be given once per exclude pattern
+                                     be given once per exclude pattern. See the `--include` option
         --extra-flag <EXTRA_FLAG>    Add additional ffmpeg flags, such as "-to 5:00" to quickly test
                                      the first few minutes of a file. Each option should be passed
                                      separately, for example: `jiffy --extra-flag='-ss 30'
@@ -43,6 +43,11 @@ OPTIONS:
                                      archival purposes. This is the only option that encodes with
                                      x264. Subtitles are hard-coded if available
     -h, --help                       Print help information
+        --include <INCLUDE>          Paths (usually glob patterns) to be included; all others are
+                                     excluded. They match from the video encode root. If `--include`
+                                     and `--exclude` are both given, only those that are matched by
+                                     the include globs and not matched by the exclude globs will be
+                                     encoded. See the `--exclude` option
     -j, --jobs <JOBS>                Encode this many videos in parallel. The default varies per
                                      encoder
         --limit <LIMIT>              Encode a certain number of files, then stop

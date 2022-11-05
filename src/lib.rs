@@ -125,8 +125,16 @@ pub struct Args {
     /// Paths (usually glob patterns) that can be excluded. They match from the video encode root.
     /// For example, "*S01*/*E01*" might be used to skip the first episode of a TV show, and "**/*E01*" would
     /// skip the first episode of each season. This argument must be given once per exclude pattern.
+    /// See the `--include` option.
     #[clap(long)]
     pub exclude: Vec<String>,
+
+    /// Paths (usually glob patterns) to be included; all others are excluded. They match from the
+    /// video encode root. If `--include` and `--exclude` are both given, only those that are matched
+    /// by the include globs and not matched by the exclude globs will be encoded.
+    /// See the `--exclude` option.
+    #[clap(long)]
+    pub include: Vec<String>,
 
     /// Run ffmpeg without `-map 0`. This occasionally fixes an encoding error.
     #[clap(long, default_value_if("for-tv", None, Some("true")))]
@@ -221,6 +229,16 @@ pub(crate) async fn get_video_paths(video_root: &Path, args: &Arc<Args>) -> Resu
     }
     let exclude = exclude.build()?;
 
+    let include = if *&args.include.is_empty() {
+        None
+    } else {
+        let mut include = GlobSetBuilder::new();
+        for pattern in &args.include {
+            include.add(Glob::new(&pattern)?);
+        }
+        Some(include.build()?)
+    };
+
     let video_re =
         Regex::new(r"^mp4|mkv|m4v|vob|ogg|ogv|wmv|yuv|y4v|mpg|mpeg|3gp|3g2|f4v|f4p|avi|webm|flv$")?;
     let mut videos = Vec::new();
@@ -242,6 +260,15 @@ pub(crate) async fn get_video_paths(video_root: &Path, args: &Arc<Args>) -> Resu
                 }
             }
             let fname = entry.path();
+            if let Some(include) = &include {
+                if !include.is_match(&fname) {
+                    log::debug!(
+                        "Skipping path because it's not an included path: {:?}",
+                        fname
+                    );
+                    continue;
+                }
+            }
             if exclude.is_match(&fname) {
                 log::debug!("Skipping path because of exclude: {:?}", fname);
                 continue;
