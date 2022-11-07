@@ -130,14 +130,14 @@ impl InputFile {
 
             match self.get_video_dimensions().await {
                 Ok((w, h)) => {
-                    let min_dimension = min(w, h);
-                    if min_dimension < 1080 {
+                    let max_dimension = max(w, h);
+                    if max_dimension < 1920 {
                         // Smaller videos need better CRF, so subtract some points--
                         // But 1080p needs no delta, but let's give 720p or lower delta=4.
-                        let shrinkage = 1080 - min_dimension;
+                        let shrinkage = 1920 - max_dimension;
                         let delta = min(
                             4,
-                            (4f32 * shrinkage as f32 / (1080 - 720) as f32).round() as u8,
+                            (4f32 * shrinkage as f32 / (1920 - 1080) as f32).round() as u8,
                         );
                         if delta > 0 {
                             _info!(
