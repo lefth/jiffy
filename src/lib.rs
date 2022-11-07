@@ -2,7 +2,7 @@ use std::{
     cmp::max,
     collections::VecDeque,
     env,
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     io::Write,
     path::{Path, PathBuf},
     pin::Pin,
@@ -220,129 +220,436 @@ enum Executable {
     FFPROBE,
 }
 
-/// Get the paths of all videos in the parent directory, excluding those in this directory.
-/// (This directory is considered the encode directory.)
-pub(crate) async fn get_video_paths(video_root: &Path, args: &Arc<Args>) -> Result<Vec<InputFile>> {
-    let mut exclude = GlobSetBuilder::new();
-    for pattern in &args.exclude {
-        exclude.add(Glob::new(&pattern)?);
-    }
-    let exclude = exclude.build()?;
-
-    let include = if *&args.include.is_empty() {
-        None
-    } else {
-        let mut include = GlobSetBuilder::new();
-        for pattern in &args.include {
-            include.add(Glob::new(&pattern)?);
-        }
-        Some(include.build()?)
-    };
-
-    let video_re =
-        Regex::new(r"^mp4|mkv|m4v|vob|ogg|ogv|wmv|yuv|y4v|mpg|mpeg|3gp|3g2|f4v|f4p|avi|webm|flv$")?;
-    let mut videos = Vec::new();
-    let mut dirs = VecDeque::from([video_root.to_owned()]);
-    let encode_dir = video_root.join(ENCODE_DIR);
-    while let Some(dir) = dirs.pop_front() {
-        let mut entries = Vec::new();
-        for entry in dir.read_dir()? {
-            entries.push(entry?);
-        }
-        entries.sort_by(|s1, s2| {
-            human_sort::compare(&s1.path().to_string_lossy(), &s2.path().to_string_lossy())
-        });
-        for entry in entries {
-            if let Some(limit) = args.limit {
-                if videos.len() == limit {
-                    log::debug!("Reached video limit={}, won't encode any more", limit);
-                    return Ok(videos);
-                }
-            }
-            let fname = entry.path();
-            if let Some(include) = &include {
-                if !include.is_match(&fname) {
-                    log::debug!(
-                        "Skipping path because it's not an included path: {:?}",
-                        fname
-                    );
-                    continue;
-                }
-            }
-            if exclude.is_match(&fname) {
-                log::debug!("Skipping path because of exclude: {:?}", fname);
-                continue;
-            }
-            if fname == encode_dir {
-                continue;
-            }
-            let md = entry.metadata()?;
-            if md.is_dir() {
-                dirs.push_back(fname);
-            } else {
-                let extension = fname
-                    .extension()
-                    .map(|ext| -> Result<_> {
-                        ext.to_ascii_lowercase()
-                            .to_str()
-                            .map(|s| s.to_string())
-                            .ok_or(anyhow!("Path can't be represented as utf-8: {:?}", &fname))
-                    })
-                    .transpose()?;
-
-                match extension {
-                    Some(extension) if video_re.is_match(&extension) => {
-                        videos.push(InputFile::new(&fname, args.clone()).await?)
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    Ok(videos)
+pub struct Encoder {
+    args: Arc<Args>,
+    ffmpeg_path: OsString,
+    video_root: PathBuf,
 }
 
-pub async fn encode_videos(args: &Arc<Args>) -> Result<()> {
-    let ffmpeg_path = find_executable(Executable::FFMPEG)?;
-
-    let (failure_tx, failures) = channel();
-    let input_files = get_video_paths(&args.video_root, args).await?;
-    let mut tasks_not_started = input_files
-        .iter()
-        .map(|input_file| encode_video(input_file, &ffmpeg_path, args, failure_tx.clone()))
-        .collect::<VecDeque<_>>();
-
-    let mut tasks_started = FuturesUnordered::new();
-    for _ in 0..args.get_jobs().expect("Jobs should be set already") {
-        if let Some(task) = tasks_not_started.pop_front() {
-            log::trace!("Pushing a task into the job list (not started)");
-            tasks_started.push(task);
-        }
+impl Encoder {
+    pub fn new(args: Args) -> Result<Encoder> {
+        return Ok(Encoder {
+            video_root: args.video_root.clone(),
+            args: Arc::new(args),
+            ffmpeg_path: find_executable(Executable::FFMPEG)?,
+        });
     }
 
-    log::trace!("Will start jobs (concurrently)");
-    while let Some(finished_task) = tasks_started.next().await {
-        log::trace!("Popped a finished a task into the job list (not started)");
-        finished_task?;
-        if let Some(next_task) = tasks_not_started.pop_front() {
-            log::trace!("Pushing another job to be run concurrently");
-            tasks_started.push(next_task);
+    pub async fn encode_videos(&self) -> Result<()> {
+        let (failure_tx, failures) = channel();
+        let input_files = self.get_video_paths().await?;
+        let mut tasks_not_started = input_files
+            .iter()
+            .map(|input_file| self.encode_video(input_file, failure_tx.clone()))
+            .collect::<VecDeque<_>>();
+
+        let mut tasks_started = FuturesUnordered::new();
+        for _ in 0..self.args.get_jobs().expect("Jobs should be set already") {
+            if let Some(task) = tasks_not_started.pop_front() {
+                log::trace!("Pushing a task into the job list (not started)");
+                tasks_started.push(task);
+            }
+        }
+
+        log::trace!("Will start jobs (concurrently)");
+        while let Some(finished_task) = tasks_started.next().await {
+            log::trace!("Popped a finished a task into the job list (not started)");
+            finished_task?;
+            if let Some(next_task) = tasks_not_started.pop_front() {
+                log::trace!("Pushing another job to be run concurrently");
+                tasks_started.push(next_task);
+            } else {
+                log::trace!("There are no more jobs to be started");
+            }
+        }
+        log::trace!("Done with concurrent jobs");
+
+        let failures: Vec<_> = failures.try_iter().collect();
+        if failures.len() > 0 {
+            log::warn!("Failure summary:");
+            for failed_path in failures {
+                log::warn!("Failed to encode: {:?}", &failed_path);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn encode_video(&self, input: &InputFile, failure_tx: Sender<PathBuf>) -> Result<()> {
+        let output_fname = input.get_output_path()?;
+        let parent = output_fname
+            .parent()
+            .expect("Generated path must have a parent directory");
+        if !parent.is_dir() {
+            if parent.exists() {
+                bail!(
+                    "Cannot encode file to {:?} because the parent exists but is not a directory.",
+                    &output_fname
+                );
+            }
+            // No need for a mutex, this is thread-safe:
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Normal args for ffmpeg:
+        let mut child_args = os_args!["-i", &input.path];
+        // Options for -vf:
+        let mut vf = Vec::<OsString>::new();
+
+        child_args.extend(os_args!(
+        str: "-nostdin -map_metadata 0 -movflags +faststart -movflags +use_metadata_tags -strict experimental"));
+        child_args.extend(os_args!["-crf", input.crf.to_string()]);
+
+        if !self.args.no_map_0 {
+            child_args.extend(os_args!(str: "-map 0"));
+        }
+
+        if self.args.for_tv {
+            if input.get_has_subtitles().await? {
+                // TODO: move the subtitles to a temp file so the name doesn't need to be escaped:
+                // (Don't literally move them; use dump_stream to temp.ass)
+
+                let sub_path = escape_vf_path(
+                    input
+                        .path
+                        .to_str()
+                        .context("Could not convert video path to utf-8. Needed for subtitles.")?,
+                );
+                let mut subs_option = OsString::from("subtitles=");
+                subs_option.push(sub_path?);
+                vf.push(subs_option);
+
+                // And don't include the existing soft subs:
+                child_args.push("-sn".into());
+            } else if let Some(sub_path) = try_find_subs(input)? {
+                let sub_path = sub_path
+                    .to_str()
+                    .context("Could not convert subtitle name to utf-8.")?
+                    .to_owned();
+                let sub_path = escape_vf_path(&sub_path);
+                let mut subs_option = OsString::from("subtitles=");
+                subs_option.push(sub_path?);
+                vf.push(subs_option);
+            } else {
+                child_args.extend(os_args!(str: "-c copy"));
+            }
         } else {
-            log::trace!("There are no more jobs to be started");
+            child_args.extend(os_args!(str: "-c copy"));
+        }
+
+        if let Some(audio_args) = self.get_audio_args(input).await {
+            child_args.extend(audio_args);
+        }
+
+        let mut x265_params = self.get_x265_params(input.crf);
+        if let Some(x265_params) = x265_params.as_mut() {
+            let x265_params = x265_params.join(", ");
+            child_args.extend(os_args!["-x265-params", &x265_params]);
+        }
+
+        if self.args.overwrite {
+            child_args.extend(os_args!["-y"]);
+        }
+
+        // Add the codec-specific flags:
+        child_args.extend(match self.args.get_codec() {
+            Codec::Av1 => os_args!(str: "-c:v libaom-av1 -cpu-used"),
+            Codec::H265 => os_args!(str: "-c:v libx265 -preset"),
+            // Source for parameters that work well with chromecast:
+            Codec::H264 => {
+                // NOTE: not tested. Let me know if these parameters don't work well with Chromecast,
+                // or some other TV-related use-case.
+                os_args!(str: "-c:v libx264 -maxrate 10M -bufsize 16M -profile:v high -level 4.1 -preset")
+            }
+        });
+        child_args.push(OsString::from(&self.args.preset));
+
+        let max_height = self.args.get_height();
+        // This -vf argument string was pretty thoroughly tested: it makes the shorter dimension equivalent to
+        // the desired height (or width for portrait mode), without changing the aspect ratio, and without upscaling.
+        // Using -2 instead of -1 ensures that the scaled dimension will be a factor of 2. Some filters need that.
+        let vf_height = format!(
+            "scale=if(gte(iw\\,ih)\\,-2\\,min({}\\,iw)):if(gte(iw\\,ih)\\,min({}\\,ih)\\,-2)",
+            max_height, max_height
+        )
+        .into();
+        let vf_pix_fmt: OsString = if self.args.eight_bit {
+            "format=yuv420p".into()
+        } else {
+            "format=yuv420p10le".into()
+        };
+        vf.extend([vf_height, vf_pix_fmt]);
+
+        // Transform list into string:
+        let vf = {
+            match &mut *vf {
+                [head, tail @ ..] => {
+                    let builder = head;
+                    for option in tail {
+                        builder.push(", ");
+                        builder.push(option);
+                    }
+                    builder
+                }
+                _ => bail!("vf cannot be empty"),
+            }
+        };
+
+        // Add extra -vf arguments if they are set for this video:
+        // foo.mp4 can have vf args set as VF_foo_mp4 or VF_foo
+        if let Some(env_vf_args) = input.env_vf_args()? {
+            _debug!(
+                input,
+                "Adding extra -vf arguments because environment variable was set"
+            );
+            vf.push(", ");
+            vf.push(env_vf_args);
+        }
+        child_args.extend(os_args!["-vf", &vf]);
+
+        // Add other args specific to this filename
+        if let Some(env_ffmpeg_args) = input.env_ffmpeg_args()? {
+            child_args.extend(env_ffmpeg_args.split_whitespace().map(OsString::from));
+        }
+
+        child_args.extend(self.args.get_extra_flags()?.iter().map(|s| s.into()));
+        match env::var("FFMPEG_FLAGS") {
+            Ok(env_args) => {
+                child_args.extend(env_args.to_string().split_whitespace().map(|s| s.into()));
+            }
+            Err(env::VarError::NotPresent) => {}
+            Err(err) => {
+                _warn!(
+                    input,
+                    "Could not get extra ffmpeg args from FFMPEG_FLAGS: {}",
+                    err,
+                );
+            }
+        }
+
+        child_args.extend(os_args![&output_fname]);
+
+        _info!(input, "");
+        _info!(input, "Executing: {:?} {:?}", &self.ffmpeg_path, child_args);
+        _info!(input, "");
+
+        let mut program = Command::new(&self.ffmpeg_path);
+        let mut command = program.args(child_args);
+        if let Some(ref log_path) = input.log_path {
+            let mut ffreport = OsString::from("file=");
+            // ':' and '\' must be escaped:
+            let lossy_logpath = log_path.to_string_lossy();
+            if lossy_logpath.contains(':') || lossy_logpath.contains(r"\") {
+                let lossy_logpath = lossy_logpath.replace(r"\", r"\\");
+                let lossy_logpath = lossy_logpath.replace(":", r"\:");
+                ffreport.push(lossy_logpath);
+            } else {
+                // It's preferable to not use lossy decoding unless characters need to be replaced:
+                ffreport.push(log_path);
+            }
+            command = command.env("FFREPORT", ffreport);
+        }
+        let mut child = command
+            .stdout(std::process::Stdio::piped())
+            // Don't send stderr to a pipe because it makes ffmpeg buffer the output.
+            // .stderr(process::Stdio::piped())
+            .spawn()?;
+
+        let mut child_stdout = child.stdout.take().unwrap();
+        let mut child_stdout = Pin::new(&mut child_stdout);
+        // let mut stderr = Box::new(child.stderr.take().unwrap()) as Box<dyn Read>;
+
+        let mut buf = vec![0; 1024];
+        loop {
+            let exit_status = child.try_wait()?;
+            let read_fut = child_stdout.read(&mut buf);
+            select! {
+                bytes_read = read_fut => {
+                    std::io::stdout().lock().write_all(&buf[..bytes_read?])?;
+                }
+                else => {
+                    // Nothing ready for read, so don't take up CPU time polling again right away
+                    sleep(Duration::from_millis(50)).await;
+                }
+            };
+
+            if let Some(exit_status) = exit_status {
+                if !exit_status.success() {
+                    _warn!(
+                        input,
+                        "Error encoding {:?}. Check ffmpeg args{}",
+                        input.path,
+                        if self.args.no_map_0 {
+                            ""
+                        } else {
+                            ", or try again without `-map 0`"
+                        }
+                    );
+                    failure_tx.send(input.path.to_owned()).unwrap();
+                }
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn get_audio_args(&self, input: &InputFile) -> Option<Vec<OsString>> {
+        let default = Some(os_args!["-c:a", "aac", "-b:a", "128k", "-ac", "2"]);
+        if self.args.skip_audio_bitrate_check {
+            _debug!(input, "Skipping audio bitrate check due to option chosen.");
+            return default;
+        } else if self.args.for_tv {
+            _debug!(
+                input,
+                "Skipping audio bitrate check: always encode for TV playback"
+            );
+            return Some(os_args!["-c:a", "aac", "-b:a", "192k", "-ac", "2"]);
+        }
+        match input.get_audio_bitrate().await {
+            Ok(bitrate) if bitrate <= 200f32 => {
+                _debug!(
+                    input,
+                    "Audio bitrate is {} kb/s. Will not reencode",
+                    bitrate
+                );
+                return Some(os_args!["-c:a", "copy"]);
+            }
+            Ok(bitrate) => {
+                _trace!(input, "Audio bitrate is {} kb/s. Will reencode", bitrate);
+            }
+            Err(err) => _warn!(input, "Could not get audio bitrate: {}", err),
+        }
+        return default;
+    }
+
+    fn get_x265_params(&self, crf: u8) -> Option<Vec<&str>> {
+        if self.args.av1 || !self.args.anime {
+            None
+        } else {
+            assert!(self.args.anime);
+
+            // These encoding tips are from: https://kokomins.wordpress.com/2019/10/10/anime-encoding-guide-for-x265-and-why-to-never-use-flac/
+            let x265_params = if self.args.anime_slow_well_lit {
+                vec![
+                    "bframes=8",
+                    "psy-rd=1",
+                    "aq-mode=3",
+                    "aq-strength=0.8",
+                    "deblock=1,1",
+                ]
+            } else if self.args.anime_mixed_dark_battle {
+                if crf >= 19 {
+                    // Note: recommended if: non-complex, motion only alternative
+                    vec![
+                        "bframes=8",
+                        "psy-rd=1",
+                        "psy-rdoq=1",
+                        "aq-mode=3",
+                        "qcomp=0.8",
+                    ]
+                } else {
+                    // Note: recommended if: motion + fancy & detailed FX
+                    vec![
+                        "limit-sao",
+                        "bframes=8",
+                        "psy-rd=1.5",
+                        "psy-rdoq=2",
+                        "aq-mode=3",
+                    ]
+                }
+            } else if crf > 19 {
+                vec!["bframes=8", "psy-rd=1", "aq-mode=3"]
+            } else {
+                vec!["limit-sao", "bframes=8", "psy-rd=1", "aq-mode=3"]
+            };
+            Some(x265_params)
         }
     }
-    log::trace!("Done with concurrent jobs");
 
-    let failures: Vec<_> = failures.try_iter().collect();
-    if failures.len() > 0 {
-        log::warn!("Failure summary:");
-        for failed_path in failures {
-            log::warn!("Failed to encode: {:?}", &failed_path);
+    /// Get the paths of all videos in the parent directory, excluding those in this directory.
+    /// (This directory is considered the encode directory.)
+    async fn get_video_paths(&self) -> Result<Vec<InputFile>> {
+        let mut exclude = GlobSetBuilder::new();
+        for pattern in &self.args.exclude {
+            exclude.add(Glob::new(&pattern)?);
         }
-    }
+        let exclude = exclude.build()?;
 
-    Ok(())
+        let include = if self.args.include.is_empty() {
+            None
+        } else {
+            let mut include = GlobSetBuilder::new();
+            for pattern in &self.args.include {
+                include.add(Glob::new(&pattern)?);
+            }
+            Some(include.build()?)
+        };
+
+        let video_re = Regex::new(
+            r"^mp4|mkv|m4v|vob|ogg|ogv|wmv|yuv|y4v|mpg|mpeg|3gp|3g2|f4v|f4p|avi|webm|flv$",
+        )?;
+        let mut videos = Vec::new();
+        let mut dirs = VecDeque::from([self.video_root.to_owned()]);
+        let encode_dir = self.video_root.join(ENCODE_DIR);
+        while let Some(dir) = dirs.pop_front() {
+            let mut entries = Vec::new();
+            for entry in dir.read_dir()? {
+                entries.push(entry?);
+            }
+            entries.sort_by(|s1, s2| {
+                human_sort::compare(&s1.path().to_string_lossy(), &s2.path().to_string_lossy())
+            });
+            for entry in entries {
+                if let Some(limit) = self.args.limit {
+                    if videos.len() == limit {
+                        log::debug!("Reached video limit={}, won't encode any more", limit);
+                        return Ok(videos);
+                    }
+                }
+                let fname = entry.path();
+                if let Some(include) = &include {
+                    if !include.is_match(&fname) {
+                        log::debug!(
+                            "Skipping path because it's not an included path: {:?}",
+                            fname
+                        );
+                        continue;
+                    }
+                }
+                if exclude.is_match(&fname) {
+                    log::debug!("Skipping path because of exclude: {:?}", fname);
+                    continue;
+                }
+                if fname == encode_dir {
+                    continue;
+                }
+                let md = entry.metadata()?;
+                if md.is_dir() {
+                    dirs.push_back(fname);
+                } else {
+                    let extension = fname
+                        .extension()
+                        .map(|ext| -> Result<_> {
+                            ext.to_ascii_lowercase()
+                                .to_str()
+                                .map(|s| s.to_string())
+                                .ok_or(anyhow!("Path can't be represented as utf-8: {:?}", &fname))
+                        })
+                        .transpose()?;
+
+                    match extension {
+                        Some(extension) if video_re.is_match(&extension) => {
+                            videos.push(InputFile::new(&fname, self.args.clone()).await?)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        Ok(videos)
+    }
 }
 
 fn find_executable(executable: Executable) -> Result<OsString> {
@@ -358,230 +665,6 @@ fn find_executable(executable: Executable) -> Result<OsString> {
         }
     }
     Ok(executable_name.into())
-}
-
-async fn encode_video(
-    input: &InputFile,
-    ffmpeg: &OsStr,
-    args: &Args,
-    failure_tx: Sender<PathBuf>,
-) -> Result<()> {
-    let output_fname = input.get_output_path()?;
-    let parent = output_fname
-        .parent()
-        .expect("Generated path must have a parent directory");
-    if !parent.is_dir() {
-        if parent.exists() {
-            bail!(
-                "Cannot encode file to {:?} because the parent exists but is not a directory.",
-                &output_fname
-            );
-        }
-        // No need for a mutex, this is thread-safe:
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Normal args for ffmpeg:
-    let mut child_args = os_args!["-i", &input.path];
-    // Options for -vf:
-    let mut vf = Vec::<OsString>::new();
-
-    child_args.extend(os_args!(
-        str: "-nostdin -map_metadata 0 -movflags +faststart -movflags +use_metadata_tags -strict experimental"));
-    child_args.extend(os_args!["-crf", input.crf.to_string()]);
-
-    if !args.no_map_0 {
-        child_args.extend(os_args!(str: "-map 0"));
-    }
-
-    if args.for_tv {
-        if input.get_has_subtitles().await? {
-            // TODO: move the subtitles to a temp file so the name doesn't need to be escaped:
-            // (Don't literally move them; use dump_stream to temp.ass)
-
-            let sub_path = escape_vf_path(
-                input
-                    .path
-                    .to_str()
-                    .context("Could not convert video path to utf-8. Needed for subtitles.")?,
-            );
-            let mut subs_option = OsString::from("subtitles=");
-            subs_option.push(sub_path?);
-            vf.push(subs_option);
-
-            // And don't include the existing soft subs:
-            child_args.push("-sn".into());
-        } else if let Some(sub_path) = try_find_subs(input)? {
-            let sub_path = sub_path
-                .to_str()
-                .context("Could not convert subtitle name to utf-8.")?
-                .to_owned();
-            let sub_path = escape_vf_path(&sub_path);
-            let mut subs_option = OsString::from("subtitles=");
-            subs_option.push(sub_path?);
-            vf.push(subs_option);
-        } else {
-            child_args.extend(os_args!(str: "-c copy"));
-        }
-    } else {
-        child_args.extend(os_args!(str: "-c copy"));
-    }
-
-    if let Some(audio_args) = get_audio_args(input, args).await {
-        child_args.extend(audio_args);
-    }
-
-    let mut x265_params = get_x265_params(args, input.crf);
-    if let Some(x265_params) = x265_params.as_mut() {
-        let x265_params = x265_params.join(", ");
-        child_args.extend(os_args!["-x265-params", &x265_params]);
-    }
-
-    if args.overwrite {
-        child_args.extend(os_args!["-y"]);
-    }
-
-    // Add the codec-specific flags:
-    child_args.extend(match args.get_codec() {
-        Codec::Av1 => os_args!(str: "-c:v libaom-av1 -cpu-used"),
-        Codec::H265 => os_args!(str: "-c:v libx265 -preset"),
-        // Source for parameters that work well with chromecast:
-        Codec::H264 => {
-            // NOTE: not tested. Let me know if these parameters don't work well with Chromecast,
-            // or some other TV-related use-case.
-            os_args!(str: "-c:v libx264 -maxrate 10M -bufsize 16M -profile:v high -level 4.1 -preset")
-        }
-    });
-    child_args.push(OsString::from(&args.preset));
-
-    let max_height = args.get_height();
-    // This -vf argument string was pretty thoroughly tested: it makes the shorter dimension equivalent to
-    // the desired height (or width for portrait mode), without changing the aspect ratio, and without upscaling.
-    // Using -2 instead of -1 ensures that the scaled dimension will be a factor of 2. Some filters need that.
-    let vf_height = format!(
-        "scale=if(gte(iw\\,ih)\\,-2\\,min({}\\,iw)):if(gte(iw\\,ih)\\,min({}\\,ih)\\,-2)",
-        max_height, max_height
-    )
-    .into();
-    let vf_pix_fmt: OsString = if args.eight_bit {
-        "format=yuv420p".into()
-    } else {
-        "format=yuv420p10le".into()
-    };
-    vf.extend([vf_height, vf_pix_fmt]);
-
-    // Transform list into string:
-    let vf = {
-        match &mut *vf {
-            [head, tail @ ..] => {
-                let builder = head;
-                for option in tail {
-                    builder.push(", ");
-                    builder.push(option);
-                }
-                builder
-            }
-            _ => bail!("vf cannot be empty"),
-        }
-    };
-
-    // Add extra -vf arguments if they are set for this video:
-    // foo.mp4 can have vf args set as VF_foo_mp4 or VF_foo
-    if let Some(env_vf_args) = input.env_vf_args()? {
-        _debug!(
-            input,
-            "Adding extra -vf arguments because environment variable was set"
-        );
-        vf.push(", ");
-        vf.push(env_vf_args);
-    }
-    child_args.extend(os_args!["-vf", &vf]);
-
-    // Add other args specific to this filename
-    if let Some(env_ffmpeg_args) = input.env_ffmpeg_args()? {
-        child_args.extend(env_ffmpeg_args.split_whitespace().map(OsString::from));
-    }
-
-    child_args.extend(args.get_extra_flags()?.iter().map(|s| s.into()));
-    match env::var("FFMPEG_FLAGS") {
-        Ok(env_args) => {
-            child_args.extend(env_args.to_string().split_whitespace().map(|s| s.into()));
-        }
-        Err(env::VarError::NotPresent) => {}
-        Err(err) => {
-            _warn!(
-                input,
-                "Could not get extra ffmpeg args from FFMPEG_FLAGS: {}",
-                err,
-            );
-        }
-    }
-
-    child_args.extend(os_args![&output_fname]);
-
-    _info!(input, "");
-    _info!(input, "Executing: {:?} {:?}", ffmpeg, child_args);
-    _info!(input, "");
-
-    let mut program = Command::new(ffmpeg);
-    let mut command = program.args(child_args);
-    if let Some(ref log_path) = input.log_path {
-        let mut ffreport = OsString::from("file=");
-        // ':' and '\' must be escaped:
-        let lossy_logpath = log_path.to_string_lossy();
-        if lossy_logpath.contains(':') || lossy_logpath.contains(r"\") {
-            let lossy_logpath = lossy_logpath.replace(r"\", r"\\");
-            let lossy_logpath = lossy_logpath.replace(":", r"\:");
-            ffreport.push(lossy_logpath);
-        } else {
-            // It's preferable to not use lossy decoding unless characters need to be replaced:
-            ffreport.push(log_path);
-        }
-        command = command.env("FFREPORT", ffreport);
-    }
-    let mut child = command
-        .stdout(std::process::Stdio::piped())
-        // Don't send stderr to a pipe because it makes ffmpeg buffer the output.
-        // .stderr(process::Stdio::piped())
-        .spawn()?;
-
-    let mut child_stdout = child.stdout.take().unwrap();
-    let mut child_stdout = Pin::new(&mut child_stdout);
-    // let mut stderr = Box::new(child.stderr.take().unwrap()) as Box<dyn Read>;
-
-    let mut buf = vec![0; 1024];
-    loop {
-        let exit_status = child.try_wait()?;
-        let read_fut = child_stdout.read(&mut buf);
-        select! {
-            bytes_read = read_fut => {
-                std::io::stdout().lock().write_all(&buf[..bytes_read?])?;
-            }
-            else => {
-                // Nothing ready for read, so don't take up CPU time polling again right away
-                sleep(Duration::from_millis(50)).await;
-            }
-        };
-
-        if let Some(exit_status) = exit_status {
-            if !exit_status.success() {
-                _warn!(
-                    input,
-                    "Error encoding {:?}. Check ffmpeg args{}",
-                    input.path,
-                    if args.no_map_0 {
-                        ""
-                    } else {
-                        ", or try again without `-map 0`"
-                    }
-                );
-                failure_tx.send(input.path.to_owned()).unwrap();
-            }
-            break;
-        }
-    }
-
-    Ok(())
 }
 
 #[allow(dead_code)]
@@ -632,79 +715,6 @@ fn try_find_subs(input: &InputFile) -> Result<Option<PathBuf>> {
     }
 
     Ok(None)
-}
-
-async fn get_audio_args(input: &InputFile, args: &Args) -> Option<Vec<OsString>> {
-    let default = Some(os_args!["-c:a", "aac", "-b:a", "128k", "-ac", "2"]);
-    if args.skip_audio_bitrate_check {
-        _debug!(input, "Skipping audio bitrate check due to option chosen.");
-        return default;
-    } else if args.for_tv {
-        _debug!(
-            input,
-            "Skipping audio bitrate check: always encode for TV playback"
-        );
-        return Some(os_args!["-c:a", "aac", "-b:a", "192k", "-ac", "2"]);
-    }
-    match input.get_audio_bitrate().await {
-        Ok(bitrate) if bitrate <= 200f32 => {
-            _debug!(
-                input,
-                "Audio bitrate is {} kb/s. Will not reencode",
-                bitrate
-            );
-            return Some(os_args!["-c:a", "copy"]);
-        }
-        Ok(bitrate) => {
-            _trace!(input, "Audio bitrate is {} kb/s. Will reencode", bitrate);
-        }
-        Err(err) => _warn!(input, "Could not get audio bitrate: {}", err),
-    }
-    return default;
-}
-
-fn get_x265_params(args: &Args, crf: u8) -> Option<Vec<&str>> {
-    if args.av1 || !args.anime {
-        None
-    } else {
-        assert!(args.anime);
-
-        // These encoding tips are from: https://kokomins.wordpress.com/2019/10/10/anime-encoding-guide-for-x265-and-why-to-never-use-flac/
-        let x265_params = if args.anime_slow_well_lit {
-            vec![
-                "bframes=8",
-                "psy-rd=1",
-                "aq-mode=3",
-                "aq-strength=0.8",
-                "deblock=1,1",
-            ]
-        } else if args.anime_mixed_dark_battle {
-            if crf >= 19 {
-                // Note: recommended if: non-complex, motion only alternative
-                vec![
-                    "bframes=8",
-                    "psy-rd=1",
-                    "psy-rdoq=1",
-                    "aq-mode=3",
-                    "qcomp=0.8",
-                ]
-            } else {
-                // Note: recommended if: motion + fancy & detailed FX
-                vec![
-                    "limit-sao",
-                    "bframes=8",
-                    "psy-rd=1.5",
-                    "psy-rdoq=2",
-                    "aq-mode=3",
-                ]
-            }
-        } else if crf > 19 {
-            vec!["bframes=8", "psy-rd=1", "aq-mode=3"]
-        } else {
-            vec!["limit-sao", "bframes=8", "psy-rd=1", "aq-mode=3"]
-        };
-        Some(x265_params)
-    }
 }
 
 #[test]

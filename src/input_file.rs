@@ -1,5 +1,5 @@
 use std::{
-    cmp::min,
+    cmp::{max, min},
     env,
     ffi::OsString,
     path::{Path, PathBuf},
@@ -165,7 +165,7 @@ impl InputFile {
     /// Returns bitrate in kb/second, for example 128 or 256.
     pub(crate) async fn get_audio_bitrate(&self) -> Result<f32> {
         let seconds = self.get_audio_seconds().await?;
-        Ok(self.get_audio_size().await? / seconds * 8f32)
+        Ok(self.get_audio_size_kb().await? / seconds * 8f32)
     }
 
     async fn get_audio_seconds(&self) -> Result<f32> {
@@ -239,7 +239,7 @@ impl InputFile {
     }
 
     /// Get the audio stream's size in kilobytes
-    async fn get_audio_size(&self) -> Result<f32> {
+    async fn get_audio_size_kb(&self) -> Result<f32> {
         _trace!(self, "Calculating audio size");
         let ffprobe = find_executable(Executable::FFPROBE)?;
         let output = Command::new(ffprobe)

@@ -1,10 +1,10 @@
-use std::{env, sync::Arc};
+use std::env;
 
 use anyhow::Result;
 use clap::StructOpt;
 use log::LevelFilter;
 
-use jiffy::{encode_videos, Args, ENCODE_DIR};
+use jiffy::{Args, Encoder, ENCODE_DIR};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,6 +25,6 @@ async fn main() -> Result<()> {
     {
         args.video_root.pop();
     }
-    encode_videos(&Arc::new(args)).await?;
+    Encoder::new(args)?.encode_videos().await?;
     Ok(())
 }
