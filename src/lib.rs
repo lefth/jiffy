@@ -111,10 +111,14 @@ pub struct Args {
     #[clap(long, short)]
     pub no_log: bool,
 
-    /// Don't check if the audio streams are within acceptable limits--just reencode them. This saves
-    /// a little time in some circumstances.
+    /// Don't check if the audio streams are within acceptable limits--just reencode them (unless
+    /// --copy-audio was specified). This saves a little time in some circumstances.
     #[clap(long = "skip-bitrate-check")]
     pub skip_audio_bitrate_check: bool,
+
+    /// Keep the audio stream unchanged. This is useful if audio bitrate can't be determined.
+    #[clap(long = "copy-audio")]
+    pub copy_audio: bool,
 
     /// Encode the videos in this directory. By default, encode in the current directory.
     /// Output files are put in "video_root/encoded". If the given path ends in "encoded",
@@ -496,7 +500,14 @@ impl Encoder {
 
     async fn get_audio_args(&self, input: &InputFile) -> Option<Vec<OsString>> {
         let default = Some(os_args!["-c:a", "aac", "-b:a", "128k", "-ac", "2"]);
-        if self.args.skip_audio_bitrate_check {
+        let audio_copy_arg = Some(os_args!["-c:a", "copy"]);
+        if self.args.copy_audio {
+            _debug!(
+                input,
+                "Skipping audio bitrate check and not encoding, due to argument"
+            );
+            return audio_copy_arg;
+        } else if self.args.skip_audio_bitrate_check {
             _debug!(input, "Skipping audio bitrate check due to option chosen.");
             return default;
         } else if self.args.for_tv {
@@ -513,7 +524,7 @@ impl Encoder {
                     "Audio bitrate is {} kb/s. Will not reencode",
                     bitrate
                 );
-                return Some(os_args!["-c:a", "copy"]);
+                return audio_copy_arg;
             }
             Ok(bitrate) => {
                 _trace!(input, "Audio bitrate is {} kb/s. Will reencode", bitrate);

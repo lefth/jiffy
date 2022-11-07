@@ -25,6 +25,8 @@ OPTIONS:
         --anime-slow-well-lit        Use this setting for slow well lit anime, like slice of life:
         --av1                        Use libaom-av1 for encoding. This is the default, except for
                                      animation
+        --copy-audio                 Keep the audio stream unchanged. This is useful if audio
+                                     bitrate can't be determined
         --crf <CRF>                  Set the quality level (for either encoded). The default is 24
                                      for AV1 and 22 for H265, but if unspecified, a better CRF may
                                      be used for small videos, or a lower quality CRF may be used
@@ -58,9 +60,9 @@ OPTIONS:
         --overwrite                  Overwrite existing output files
         --preset <PRESET>            The encoding preset to use--by default this is fairly slow. By
                                      default, "6" for libaom, "slow" for x265
-        --skip                       Don't check if the audio streams are within acceptable
-                                     limits--just reencode them. This saves a little time in some
-                                     circumstances
+        --skip-bitrate-check         Don't check if the audio streams are within acceptable
+                                     limits--just reencode them (unless --copy-audio was specified).
+                                     This saves a little time in some circumstances
         --x265                       Use x265 instead of aom-av1. This is true by default with
                                      --animation
 ```
