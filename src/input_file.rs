@@ -29,7 +29,7 @@ impl InputFile {
             crf: u8::MAX, // placeholder
             args,
         };
-        ret.init().await;
+        ret.init().await?;
         Ok(ret)
     }
 
@@ -64,7 +64,7 @@ impl InputFile {
         let extension = if is_mp4 { "mp4" } else { "mkv" };
         output.set_extension("");
         let mut output = output.into_os_string();
-        if self.args.get_codec() == Codec::Av1 {
+        if self.args.get_video_codec() == Codec::Av1 {
             output.push(format!("-{}", self.args.preset));
         }
         output.push(format!("-crf{}", self.crf));
@@ -115,21 +115,23 @@ impl InputFile {
         }
     }
 
-    async fn init(&mut self) {
+    async fn init(&mut self) -> Result<()> {
+        let codec = self.args.get_video_codec();
         self.crf = if let Some(crf) = self.args.crf {
             crf
         } else {
-            let mut crf = match self.args.get_codec() {
+            let mut crf = match codec {
                 Codec::Av1 => 24,
                 Codec::H265 => 22,
                 Codec::H264 => 17,
+                Codec::Copy => 0,
             };
             if self.args.anime {
                 crf += 3;
             }
 
             match self.get_video_dimensions().await {
-                Ok((w, h)) => {
+                Ok((w, h)) if codec != Codec::Copy => {
                     let max_dimension = max(w, h);
                     if max_dimension < 1920 {
                         // Smaller videos need better CRF, so subtract some points--
@@ -156,10 +158,13 @@ impl InputFile {
                         err
                     );
                 }
+                _ => {}
             }
 
             crf
         };
+
+        Ok(())
     }
 
     /// Returns bitrate in kb/second, for example 128 or 256.

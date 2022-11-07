@@ -34,6 +34,7 @@ enum Codec {
     Av1,
     H265,
     H264,
+    Copy,
 }
 
 #[derive(Parser)]
@@ -49,25 +50,24 @@ pub struct Args {
     x265: bool,
 
     /// Use libaom-av1 for encoding. This is the default, except for animation.
-    #[clap(long = "av1", aliases = &["aom", "libaom", "aom-av1"])]
+    #[clap(long = "av1", aliases = ["aom", "libaom", "aom-av1"])]
     av1: bool,
 
     /// Use settings that work well for anime or animation.
     #[clap(long = "animation", alias = "anime",
-        default_value_ifs = &[
-            ("anime-slow-well-lit", None, Some("true")),
-            ("anime-mixed-dark-battle", None, Some("true")),
+        default_value_ifs = [
+            ("anime_slow_well_lit", "true", "true"),
+            ("anime_mixed_dark_battle", "true", "true"),
         ],
-        min_values(0),
     )]
     anime: bool,
 
     /// Use this setting for slow well lit anime, like slice of life:
-    #[clap(long, conflicts_with_all = &["av1", "anime-mixed-dark-battle"])]
+    #[clap(long, conflicts_with_all = ["av1", "anime_mixed_dark_battle"])]
     anime_slow_well_lit: bool,
 
     /// Use this setting for anime with some dark scenes, some battle scenes (shonen, historical, etc.)
-    #[clap(long, conflicts_with_all = &["av1", "anime-slow-well-lit"])]
+    #[clap(long, conflicts_with_all = ["av1", "anime_slow_well_lit"])]
     anime_mixed_dark_battle: bool,
 
     /// Encode this many videos in parallel. The default varies per encoder.
@@ -83,18 +83,17 @@ pub struct Args {
     #[clap(
         long = "8-bit",
         alias = "8bit",
-        default_value_if("for-tv", None, Some("true"))
+        default_value_if("for_tv", "true", "true")
     )]
     pub eight_bit: bool,
 
     /// The encoding preset to use--by default this is fairly slow. By default, "6" for libaom, "slow" for x265.
     #[clap(
         long,
-        default_value = "6",
         hide_default_value = true,
-        default_value_if("x265", None, Some("slow")),
-        default_value_if("for-tv", None, Some("fast"))
-    )]
+        default_value = "6",
+        default_value_if("x265", "true", "slow"),
+        default_value_if("for_tv", "true", "fast"))]
     pub preset: String,
 
     /// Overwrite existing output files
@@ -113,12 +112,27 @@ pub struct Args {
 
     /// Don't check if the audio streams are within acceptable limits--just reencode them (unless
     /// --copy-audio was specified). This saves a little time in some circumstances.
-    #[clap(long = "skip-bitrate-check")]
+    #[clap(long = "skip-bitrate-check",
+        default_value_if("copy_streams", "true", "true"),
+        default_value_if("no_audio", "true", "true"))]
     pub skip_audio_bitrate_check: bool,
 
     /// Keep the audio stream unchanged. This is useful if audio bitrate can't be determined.
-    #[clap(long = "copy-audio")]
+    #[clap(
+        long = "copy-audio",
+        default_value_if("copy_streams", "true", "true"))]
     pub copy_audio: bool,
+
+    /// Copy audio and video streams (don't encode). Used for testing, for example passing
+    /// `--copy-streams --extra-flag='-to 30'` would copy a 30 second from each video.
+    /// Implies `--copy-audio`.
+    #[clap(long = "copy-streams", conflicts_with_all = ["av1", "x265", "for_tv", "height_720p",
+        "anime", "anime_mixed_dark_battle", "anime_slow_well_lit", "crf", "preset"])]
+    pub copy_streams: bool,
+
+    /// For testing and benchmarking.
+    #[clap(long = "no-audio", conflicts_with = "copy_audio")]
+    pub no_audio: bool,
 
     /// Encode the videos in this directory. By default, encode in the current directory.
     /// Output files are put in "video_root/encoded". If the given path ends in "encoded",
@@ -141,7 +155,7 @@ pub struct Args {
     pub include: Vec<String>,
 
     /// Run ffmpeg without `-map 0`. This occasionally fixes an encoding error.
-    #[clap(long, default_value_if("for-tv", None, Some("true")))]
+    #[clap(long, default_value_if("for_tv", "true", "true"))]
     pub no_map_0: bool,
 
     /// Encode a certain number of files, then stop.
@@ -154,13 +168,15 @@ pub struct Args {
     /// the need for transcoding.
     // If you find this option is not compatible with your TV, please let me know what model and what encoding
     // options do work.
-    #[clap(long, conflicts_with_all = &["av1", "x265", "anime", "anime-slow-well-lit", "anime-mixed-dark-battle"], takes_value(false))]
+    #[clap(long = "for-tv", conflicts_with_all = ["av1", "x265", "anime", "anime_slow_well_lit", "anime_mixed_dark_battle"])]
     pub for_tv: bool,
 }
 
 impl Args {
-    pub(crate) fn get_codec(&self) -> Codec {
-        if self.for_tv {
+    pub(crate) fn get_video_codec(&self) -> Codec {
+        if self.copy_streams {
+            Codec::Copy
+        } else if self.for_tv {
             Codec::H264
         } else if !self.x265 && (self.av1 || !self.anime) {
             Codec::Av1
@@ -302,7 +318,10 @@ impl Encoder {
 
         child_args.extend(os_args!(
         str: "-nostdin -map_metadata 0 -movflags +faststart -movflags +use_metadata_tags -strict experimental"));
-        child_args.extend(os_args!["-crf", input.crf.to_string()]);
+        let codec = self.args.get_video_codec();
+        if codec != Codec::Copy {
+            child_args.extend(os_args!["-crf", input.crf.to_string()]);
+        }
 
         if !self.args.no_map_0 {
             child_args.extend(os_args!(str: "-map 0"));
@@ -356,60 +375,66 @@ impl Encoder {
         }
 
         // Add the codec-specific flags:
-        child_args.extend(match self.args.get_codec() {
-            Codec::Av1 => os_args!(str: "-c:v libaom-av1 -cpu-used"),
-            Codec::H265 => os_args!(str: "-c:v libx265 -preset"),
-            // Source for parameters that work well with chromecast:
-            Codec::H264 => {
+        if codec == Codec::Copy
+        {
+            child_args.extend(os_args!(str: "-c:v copy"));
+        } else {
+            child_args.extend(match codec {
+                Codec::Av1 => os_args!(str: "-c:v libaom-av1 -cpu-used"),
+                Codec::H265 => os_args!(str: "-c:v libx265 -preset"),
                 // NOTE: not tested. Let me know if these parameters don't work well with Chromecast,
                 // or some other TV-related use-case.
-                os_args!(str: "-c:v libx264 -maxrate 10M -bufsize 16M -profile:v high -level 4.1 -preset")
-            }
-        });
-        child_args.push(OsString::from(&self.args.preset));
-
-        let max_height = self.args.get_height();
-        // This -vf argument string was pretty thoroughly tested: it makes the shorter dimension equivalent to
-        // the desired height (or width for portrait mode), without changing the aspect ratio, and without upscaling.
-        // Using -2 instead of -1 ensures that the scaled dimension will be a factor of 2. Some filters need that.
-        let vf_height = format!(
-            "scale=if(gte(iw\\,ih)\\,-2\\,min({}\\,iw)):if(gte(iw\\,ih)\\,min({}\\,ih)\\,-2)",
-            max_height, max_height
-        )
-        .into();
-        let vf_pix_fmt: OsString = if self.args.eight_bit {
-            "format=yuv420p".into()
-        } else {
-            "format=yuv420p10le".into()
-        };
-        vf.extend([vf_height, vf_pix_fmt]);
-
-        // Transform list into string:
-        let vf = {
-            match &mut *vf {
-                [head, tail @ ..] => {
-                    let builder = head;
-                    for option in tail {
-                        builder.push(", ");
-                        builder.push(option);
-                    }
-                    builder
+                Codec::H264 => 
+                    os_args!(str: "-c:v libx264 -maxrate 10M -bufsize 16M -profile:v high -level 4.1 -preset"),
+                _ => {
+                    bail!("Codec not handled: {:?}", codec);
                 }
-                _ => bail!("vf cannot be empty"),
-            }
-        };
+            });
+            child_args.push(OsString::from(&self.args.preset));
 
-        // Add extra -vf arguments if they are set for this video:
-        // foo.mp4 can have vf args set as VF_foo_mp4 or VF_foo
-        if let Some(env_vf_args) = input.env_vf_args()? {
-            _debug!(
-                input,
-                "Adding extra -vf arguments because environment variable was set"
-            );
-            vf.push(", ");
-            vf.push(env_vf_args);
+            let max_height = self.args.get_height();
+            // This -vf argument string was pretty thoroughly tested: it makes the shorter dimension equivalent to
+            // the desired height (or width for portrait mode), without changing the aspect ratio, and without upscaling.
+            // Using -2 instead of -1 ensures that the scaled dimension will be a factor of 2. Some filters need that.
+            let vf_height = format!(
+                "scale=if(gte(iw\\,ih)\\,-2\\,min({}\\,iw)):if(gte(iw\\,ih)\\,min({}\\,ih)\\,-2)",
+                max_height, max_height
+            )
+            .into();
+            let vf_pix_fmt: OsString = if self.args.eight_bit {
+                "format=yuv420p".into()
+            } else {
+                "format=yuv420p10le".into()
+            };
+            vf.extend([vf_height, vf_pix_fmt]);
+
+            // Transform list into string:
+            let vf = {
+                match &mut *vf {
+                    [head, tail @ ..] => {
+                        let builder = head;
+                        for option in tail {
+                            builder.push(", ");
+                            builder.push(option);
+                        }
+                        builder
+                    }
+                    _ => bail!("vf cannot be empty"),
+                }
+            };
+
+            // Add extra -vf arguments if they are set for this video:
+            // foo.mp4 can have vf args set as VF_foo_mp4 or VF_foo
+            if let Some(env_vf_args) = input.env_vf_args()? {
+                _debug!(
+                    input,
+                    "Adding extra -vf arguments because environment variable was set"
+                );
+                vf.push(", ");
+                vf.push(env_vf_args);
+            }
+            child_args.extend(os_args!["-vf", &vf]);
         }
-        child_args.extend(os_args!["-vf", &vf]);
 
         // Add other args specific to this filename
         if let Some(env_ffmpeg_args) = input.env_ffmpeg_args()? {
@@ -501,7 +526,10 @@ impl Encoder {
     async fn get_audio_args(&self, input: &InputFile) -> Option<Vec<OsString>> {
         let default = Some(os_args!["-c:a", "aac", "-b:a", "128k", "-ac", "2"]);
         let audio_copy_arg = Some(os_args!["-c:a", "copy"]);
-        if self.args.copy_audio {
+        if self.args.no_audio {
+            _debug!(input, "Removing audio entirely, due to argument");
+            return Some(os_args!["-an"]);
+        } else if self.args.copy_audio {
             _debug!(
                 input,
                 "Skipping audio bitrate check and not encoding, due to argument"
@@ -731,34 +759,34 @@ fn try_find_subs(input: &InputFile) -> Result<Option<PathBuf>> {
 #[test]
 fn test_opt_codec() {
     let args = &Args::parse_from(["prog_name", "--av1"]);
-    assert_eq!(args.get_codec(), Codec::Av1);
+    assert_eq!(args.get_video_codec(), Codec::Av1);
 
     let args = &Args::parse_from(["prog_name"]);
-    assert_eq!(args.get_codec(), Codec::Av1);
+    assert_eq!(args.get_video_codec(), Codec::Av1);
 
     let args = &Args::parse_from(["prog_name", "--x265"]);
-    assert_eq!(args.get_codec(), Codec::H265);
+    assert_eq!(args.get_video_codec(), Codec::H265);
 
     let args = &Args::parse_from(["prog_name", "--h265"]);
-    assert_eq!(args.get_codec(), Codec::H265);
+    assert_eq!(args.get_video_codec(), Codec::H265);
 
     let args = &Args::parse_from(["prog_name", "--anime"]);
-    assert_eq!(args.get_codec(), Codec::H265);
+    assert_eq!(args.get_video_codec(), Codec::H265);
 
     let args = &Args::parse_from(["prog_name", "--for-tv"]);
-    assert_eq!(args.get_codec(), Codec::H264);
+    assert_eq!(args.get_video_codec(), Codec::H264);
 
     let args = &Args::parse_from(["prog_name", "--anime", "--aom-av1"]);
-    assert_eq!(args.get_codec(), Codec::Av1);
+    assert_eq!(args.get_video_codec(), Codec::Av1);
 
     let args = &Args::parse_from(["prog_name", "--anime", "--aom-av1"]);
-    assert_eq!(args.get_codec(), Codec::Av1);
+    assert_eq!(args.get_video_codec(), Codec::Av1);
 
     let args = &Args::parse_from(["prog_name", "--anime-mixed-dark-battle"]);
-    assert_eq!(args.get_codec(), Codec::H265);
+    assert_eq!(args.get_video_codec(), Codec::H265);
 
     let args = &Args::parse_from(["prog_name", "--anime-slow-well-lit"]);
-    assert_eq!(args.get_codec(), Codec::H265);
+    assert_eq!(args.get_video_codec(), Codec::H265);
 }
 
 #[test]
@@ -772,6 +800,12 @@ fn test_incompatible_opts() {
         Args::try_parse_from(["prog_name", "--anime-mixed-dark-battle", "--av1"]),
         Err(_)
     ));
+}
+
+#[test]
+fn test_crf() {
+    let args = Args::parse_from("prog_name --include '**/*Online*Course*' $USERPROFILE/dwhelper/ --overwrite --no-audio --x265 --no-log --crf 26".split_whitespace());
+    assert_eq!(args.crf, Some(26));
 }
 
 #[test]
@@ -835,6 +869,7 @@ fn test_output_fname() {
 #[test]
 fn test_preset() -> Result<()> {
     let args = &Args::parse_from(["prog_name"]);
+    assert_eq!(args.x265, false);
     assert_eq!(args.eight_bit, false);
     assert_eq!(args.preset, "6");
     let args = &Args::parse_from(["prog_name", "--preset=3"]);

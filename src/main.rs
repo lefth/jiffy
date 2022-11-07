@@ -1,7 +1,7 @@
 use std::env;
 
 use anyhow::Result;
-use clap::StructOpt;
+use clap::Parser;
 use log::LevelFilter;
 
 use jiffy::{Args, Encoder, ENCODE_DIR};
