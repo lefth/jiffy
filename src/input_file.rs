@@ -123,7 +123,8 @@ impl InputFile {
             let mut crf = match codec {
                 Codec::Av1 => 24,
                 Codec::H265 => 22,
-                Codec::H264 => 17,
+                Codec::H264 if self.args.for_tv => 17,
+                Codec::H264 => 8, // if not for TV, this old codec is most useful for making a reference clip
                 Codec::Copy => 0,
             };
             if self.args.anime {

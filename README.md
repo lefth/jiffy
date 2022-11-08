@@ -65,6 +65,7 @@ OPTIONS:
                                      This saves a little time in some circumstances
         --x265                       Use x265 instead of aom-av1. This is true by default with
                                      --animation
+        --reference                  Use x264 to make a high quality (high space) fast encode
 ```
 
 ### Environment variables

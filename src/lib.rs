@@ -46,8 +46,12 @@ pub struct Args {
     crf: Option<u8>,
 
     /// Use x265 instead of aom-av1. This is true by default with --animation.
-    #[clap(long, alias = "h265", conflicts_with = "av1")]
+    #[clap(long, alias = "h265", conflicts_with_all = ["av1", "reference"])]
     x265: bool,
+
+    /// Use x264 to make a high quality (high space) fast encode.
+    #[clap(long, conflicts_with_all = ["av1", "x265"])]
+    reference: bool,
 
     /// Use libaom-av1 for encoding. This is the default, except for animation.
     #[clap(long = "av1", aliases = ["aom", "libaom", "aom-av1"])]
@@ -63,11 +67,11 @@ pub struct Args {
     anime: bool,
 
     /// Use this setting for slow well lit anime, like slice of life:
-    #[clap(long, conflicts_with_all = ["av1", "anime_mixed_dark_battle"])]
+    #[clap(long, conflicts_with_all = ["av1", "anime_mixed_dark_battle", "reference"])]
     anime_slow_well_lit: bool,
 
     /// Use this setting for anime with some dark scenes, some battle scenes (shonen, historical, etc.)
-    #[clap(long, conflicts_with_all = ["av1", "anime_slow_well_lit"])]
+    #[clap(long, conflicts_with_all = ["av1", "anime_slow_well_lit", "reference"])]
     anime_mixed_dark_battle: bool,
 
     /// Encode this many videos in parallel. The default varies per encoder.
@@ -83,7 +87,8 @@ pub struct Args {
     #[clap(
         long = "8-bit",
         alias = "8bit",
-        default_value_if("for_tv", "true", "true")
+        default_value_if("for_tv", "true", "true"),
+        default_value_if("reference", "true", "true")
     )]
     pub eight_bit: bool,
 
@@ -92,8 +97,10 @@ pub struct Args {
         long,
         hide_default_value = true,
         default_value = "6",
+        default_value_if("reference", "true", "veryfast"),
         default_value_if("x265", "true", "slow"),
-        default_value_if("for_tv", "true", "fast"))]
+        default_value_if("for_tv", "true", "fast")
+    )]
     pub preset: String,
 
     /// Overwrite existing output files
@@ -112,21 +119,21 @@ pub struct Args {
 
     /// Don't check if the audio streams are within acceptable limits--just reencode them (unless
     /// --copy-audio was specified). This saves a little time in some circumstances.
-    #[clap(long = "skip-bitrate-check",
+    #[clap(
+        long = "skip-bitrate-check",
         default_value_if("copy_streams", "true", "true"),
-        default_value_if("no_audio", "true", "true"))]
+        default_value_if("no_audio", "true", "true")
+    )]
     pub skip_audio_bitrate_check: bool,
 
     /// Keep the audio stream unchanged. This is useful if audio bitrate can't be determined.
-    #[clap(
-        long = "copy-audio",
-        default_value_if("copy_streams", "true", "true"))]
+    #[clap(long = "copy-audio", default_value_if("copy_streams", "true", "true"))]
     pub copy_audio: bool,
 
     /// Copy audio and video streams (don't encode). Used for testing, for example passing
     /// `--copy-streams --extra-flag='-to 30'` would copy a 30 second from each video.
     /// Implies `--copy-audio`.
-    #[clap(long = "copy-streams", conflicts_with_all = ["av1", "x265", "for_tv", "height_720p",
+    #[clap(long = "copy-streams", conflicts_with_all = ["av1", "x265", "reference", "for_tv", "height_720p",
         "anime", "anime_mixed_dark_battle", "anime_slow_well_lit", "crf", "preset"])]
     pub copy_streams: bool,
 
@@ -168,7 +175,7 @@ pub struct Args {
     /// the need for transcoding.
     // If you find this option is not compatible with your TV, please let me know what model and what encoding
     // options do work.
-    #[clap(long = "for-tv", conflicts_with_all = ["av1", "x265", "anime", "anime_slow_well_lit", "anime_mixed_dark_battle"])]
+    #[clap(long = "for-tv", conflicts_with_all = ["av1", "x265", "reference", "anime", "anime_slow_well_lit", "anime_mixed_dark_battle"])]
     pub for_tv: bool,
 }
 
@@ -176,7 +183,7 @@ impl Args {
     pub(crate) fn get_video_codec(&self) -> Codec {
         if self.copy_streams {
             Codec::Copy
-        } else if self.for_tv {
+        } else if self.reference || self.for_tv {
             Codec::H264
         } else if !self.x265 && (self.av1 || !self.anime) {
             Codec::Av1
@@ -375,8 +382,7 @@ impl Encoder {
         }
 
         // Add the codec-specific flags:
-        if codec == Codec::Copy
-        {
+        if codec == Codec::Copy {
             child_args.extend(os_args!(str: "-c:v copy"));
         } else {
             child_args.extend(match codec {
@@ -384,11 +390,10 @@ impl Encoder {
                 Codec::H265 => os_args!(str: "-c:v libx265 -preset"),
                 // NOTE: not tested. Let me know if these parameters don't work well with Chromecast,
                 // or some other TV-related use-case.
-                Codec::H264 => 
+                Codec::H264 if self.args.for_tv =>
                     os_args!(str: "-c:v libx264 -maxrate 10M -bufsize 16M -profile:v high -level 4.1 -preset"),
-                _ => {
-                    bail!("Codec not handled: {:?}", codec);
-                }
+                Codec::H264 => os_args!(str: "-c:v libx264 -profile:v high -level 4.1 -preset"),
+                _ => bail!("Codec not handled: {:?}", codec),
             });
             child_args.push(OsString::from(&self.args.preset));
 
@@ -776,6 +781,9 @@ fn test_opt_codec() {
     let args = &Args::parse_from(["prog_name", "--for-tv"]);
     assert_eq!(args.get_video_codec(), Codec::H264);
 
+    let args = &Args::parse_from(["prog_name", "--reference"]);
+    assert_eq!(args.get_video_codec(), Codec::H264);
+
     let args = &Args::parse_from(["prog_name", "--anime", "--aom-av1"]);
     assert_eq!(args.get_video_codec(), Codec::Av1);
 
@@ -863,6 +871,34 @@ fn test_output_fname() {
     assert_eq!(
         input.get_output_path().unwrap(),
         PathBuf::from("/a/encoded/vid-crf22.mkv")
+    );
+
+    let args = Arc::new(Args::parse_from([
+        "prog_name",
+        "--copy-streams",
+        "--no-log",
+        "/a",
+    ]));
+    let input = rt
+        .block_on(InputFile::new(Path::new("/a/vid.flv"), args.clone()))
+        .unwrap();
+    assert_eq!(
+        input.get_output_path().unwrap(),
+        PathBuf::from("/a/encoded/vid-crf0.mkv")
+    );
+
+    let args = Arc::new(Args::parse_from([
+        "prog_name",
+        "--reference",
+        "--no-log",
+        "/a",
+    ]));
+    let input = rt
+        .block_on(InputFile::new(Path::new("/a/vid.flv"), args.clone()))
+        .unwrap();
+    assert_eq!(
+        input.get_output_path().unwrap(),
+        PathBuf::from("/a/encoded/vid-crf8.mkv")
     );
 }
 
