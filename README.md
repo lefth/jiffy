@@ -6,66 +6,57 @@ A wrapper for ffmpeg that runs multiple jobs at the same time. This program is m
 of videos while containing the most commonly used options. The main encoders used are AOMedia AV1 and x265.
 
 ```
-USAGE:
-    jiffy [OPTIONS] [--] [VIDEO_ROOT]
+Usage: jiffy [OPTIONS] [VIDEO_ROOT]
 
-ARGS:
-    <VIDEO_ROOT>    Encode the videos in this directory. By default, encode in the current
-                    directory. Output files are put in "video_root/encoded". If the given path
-                    ends in "encoded", the real video root is taken to be the parent directory
+Arguments:
+  [VIDEO_ROOT]  Encode the videos in this directory. By default, encode in the current directory. Output
+                files are put in "video_root/encoded". If the given path ends in "encoded", the real video
+                root is taken to be the parent directory.
 
-OPTIONS:
-        --720p                       Encode as 720p. Otherwise the video will be 1080p. The source
-                                     size is taken into consideration; in no case is a video scaled
-                                     up
-        --8-bit <eight-bit>          Encode as 8-bit. Otherwise the video will be 10-bit
-        --animation <anime>...       Use settings that work well for anime or animation
-        --anime-mixed-dark-battle    Use this setting for anime with some dark scenes, some battle
-                                     scenes (shonen, historical, etc.)
-        --anime-slow-well-lit        Use this setting for slow well lit anime, like slice of life:
-        --av1                        Use libaom-av1 for encoding. This is the default, except for
-                                     animation
-        --copy-audio                 Keep the audio stream unchanged. This is useful if audio
-                                     bitrate can't be determined
-        --crf <CRF>                  Set the quality level (for either encoded). The default is 24
-                                     for AV1 and 22 for H265, but if unspecified, a better CRF may
-                                     be used for small videos, or a lower quality CRF may be used
-                                     for animation
-        --exclude <EXCLUDE>          Paths (usually glob patterns) that can be excluded. They match
-                                     from the video encode root. For example, "*S01*/*E01*" might be
-                                     used to skip the first episode of a TV show, and "**/*E01*"
-                                     would skip the first episode of each season. This argument must
-                                     be given once per exclude pattern. See the `--include` option
-        --extra-flag <EXTRA_FLAG>    Add additional ffmpeg flags, such as "-to 5:00" to quickly test
-                                     the first few minutes of a file. Each option should be passed
-                                     separately, for example: `jiffy --extra-flag='-ss 30'
-                                     --extra-flag='-t 5:00'`
-        --for-tv                     Make a high quality but inefficient file for low spec
-                                     televisions. The output is intended for watching, not for
-                                     archival purposes. This is the only option that encodes with
-                                     x264. Subtitles are hard-coded if available
-    -h, --help                       Print help information
-        --include <INCLUDE>          Paths (usually glob patterns) to be included; all others are
-                                     excluded. They match from the video encode root. If `--include`
-                                     and `--exclude` are both given, only those that are matched by
-                                     the include globs and not matched by the exclude globs will be
-                                     encoded. See the `--exclude` option
-    -j, --jobs <JOBS>                Encode this many videos in parallel. The default varies per
-                                     encoder
-        --limit <LIMIT>              Encode a certain number of files, then stop
-    -n, --no-log                     Don't write log files for each ffmpeg invocation. This avoids
-                                     polluting your output directory with a log file per input
-        --no-map-0                   Run ffmpeg without `-map 0`. This occasionally fixes an
-                                     encoding error
-        --overwrite                  Overwrite existing output files
-        --preset <PRESET>            The encoding preset to use--by default this is fairly slow. By
-                                     default, "6" for libaom, "slow" for x265
-        --skip-bitrate-check         Don't check if the audio streams are within acceptable
-                                     limits--just reencode them (unless --copy-audio was specified).
-                                     This saves a little time in some circumstances
-        --x265                       Use x265 instead of aom-av1. This is true by default with
-                                     --animation
-        --reference                  Use x264 to make a high quality (high space) fast encode
+Options:
+      --crf <CRF>                Set the quality level (for either encoded). The default is 24 for AV1 and 22 for H265, but
+                                 if unspecified, a better CRF may be used for small videos, or a lower quality CRF may be
+                                 used for animation.
+      --x265                     Use x265 instead of aom-av1. This is true by default with --animation.
+      --reference                Use x264 to make a high quality (high space) fast encode.
+      --av1                      Use libaom-av1 for encoding. This is the default, except for animation.
+      --animation                Use settings that work well for anime or animation.
+      --anime-slow-well-lit      Use this setting for slow well lit anime, like slice of life:
+      --anime-mixed-dark-battle  Use this setting for anime with some dark scenes, some battle scenes (shonen, historical, etc.)
+  -j, --jobs <JOBS>              Encode this many videos in parallel. The default varies per encoder.
+      --720p                     Encode as 720p. Otherwise the video will be 1080p. The source size is taken into
+                                 consideration; in no case is a video scaled up.
+      --8-bit                    Encode as 8-bit. Otherwise the video will be 10-bit.
+      --preset <PRESET>          The encoding preset to use--by default this is fairly slow. By default, "6" for libaom,
+                                 "slow" for x265.
+      --overwrite                Overwrite existing output files
+      --extra-flag <EXTRA_FLAG>  Add additional ffmpeg flags, such as "-to 5:00" to quickly test the first few minutes of a
+                                 file.  Each option should be passed separately, for example:
+                                 `jiffy --extra-flag='-ss 30' --extra-flag='-t 5:00'`
+  -n, --no-log                   Don't write log files for each ffmpeg invocation. This avoids polluting your output
+                                 directory with a log file per input.
+      --skip-bitrate-check       Don't check if the audio streams are within acceptable limits--just reencode them (unless
+                                 `--copy-audio` was specified). This saves a little time in some circumstances.
+      --copy-audio               Keep the audio stream unchanged. This is useful if audio bitrate can't be determined.
+      --copy-streams             Copy audio and video streams (don't encode). Used for testing, for example passing
+                                 `--copy-streams --extra-flag='-to 30'` would copy a 30 second from each video. Implies
+                                 `--copy-audio`.
+      --no-audio                 For testing and benchmarking.
+      --exclude <EXCLUDE>        Paths (usually glob patterns) that can be excluded. They match from the video encode root.
+                                 For example, "*S01*/*E01*" might be used to skip the first episode of a TV show, and
+                                 "**/*E01*" would skip the first episode of each season. This argument must be given once
+                                 per exclude pattern.  See the `--include` option.
+      --include <INCLUDE>        Paths (usually glob patterns) to be included; all others are excluded. They match from the
+                                 video encode root. If `--include` and `--exclude` are both given, only those that are
+                                 matched by the include globs and not matched by the exclude globs will be encoded.  See the
+                                 `--exclude` option.
+      --no-map-0                 Run ffmpeg without `-map 0`. This occasionally fixes an encoding error.
+      --limit <LIMIT>            Encode a certain number of files, then stop.
+      --for-tv                   Make a high quality but inefficient file for low spec televisions. The output is intended
+                                 for watching, not for archival purposes. This is the only option that encodes with x264.
+                                 Subtitles are hard-coded if available. These files should be compatible with Chromecast
+                                 without the need for transcoding.
+  -h, --help                     Print help information
 ```
 
 ### Environment variables
