@@ -227,8 +227,8 @@ impl InputFile {
 
         let time_regex = Regex::new(r"(\d+):(\d{2}):(\d{2}\.\d+)").unwrap();
         let captures = time_regex.captures_iter(&output).last().expect(
-            "Could not find a time in the ffmpeg output. A bug report containing the input file \
-                or the ffmpeg output would be appreciated.",
+            &format!("Could not find a time in the ffmpeg output. A bug report containing the input file \
+                or the ffmpeg output would be appreciated. Input file={}", &self.path.to_string_lossy()),
         );
 
         let seconds = captures.get(1).unwrap().as_str().parse::<f32>()? * 3600f32
@@ -295,9 +295,14 @@ impl InputFile {
             .output()
             .await?;
 
+        let str = self.path.to_string_lossy();
         let output = String::from_utf8(output.stdout)?;
-        let (width, height) = scan_fmt::scan_fmt!(&output, "{}x{}", u32, u32)?;
-        Ok((width, height))
+        // Some versions of ffprobe add an extra 'x' at the end:
+        let re = Regex::new(r"(\d+)x(\d+)x?").unwrap();
+        return re.captures(&output).map(|cap|
+            (cap.get(1).unwrap().as_str().parse::<u32>().unwrap(),
+            cap.get(2).unwrap().as_str().parse::<u32>().unwrap()))
+        .context(format!("Could not parse dimensions of file '{str}': '{output}'"));
     }
 
     /// Get the last part of the filename (without directory parts).

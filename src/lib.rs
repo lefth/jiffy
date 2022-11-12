@@ -176,6 +176,7 @@ pub struct Args {
     /// for watching, not for archival purposes. This is the only option that encodes with x264.
     /// Subtitles are hard-coded if available. These files should be compatible with Chromecast
     /// without the need for transcoding.
+    ///
     // If you find this option is not compatible with your TV, please let me know what model and what encoding
     // options do work.
     #[clap(long = "for-tv", conflicts_with_all = ["av1", "x265", "reference", "anime", "anime_slow_well_lit", "anime_mixed_dark_battle"])]
@@ -290,15 +291,21 @@ enum Executable {
 
 pub struct Encoder {
     args: Arc<Args>,
+    exclude_as_paths: Vec<PathBuf>,
+    include_as_paths: Vec<PathBuf>,
     ffmpeg_path: OsString,
     video_root: PathBuf,
 }
 
 impl Encoder {
     pub fn new(args: Args) -> Result<Encoder> {
+        let exclude_as_paths = args.exclude.iter().map(PathBuf::from).collect();
+        let include_as_paths = args.include.iter().map(PathBuf::from).collect();
         return Ok(Encoder {
             video_root: args.video_root.clone(),
             args: Arc::new(args),
+            exclude_as_paths,
+            include_as_paths,
             ffmpeg_path: find_executable(Executable::FFMPEG)?,
         });
     }
@@ -696,49 +703,70 @@ impl Encoder {
                 let fname = entry.path();
                 let relative_path = pathdiff::diff_paths(fname.clone(), self.video_root.clone());
                 let matchable_path = relative_path.unwrap_or(fname.clone());
+
                 if let Some(include) = &include {
                     if !include.is_match(&matchable_path) {
-                        log::debug!(
-                            "Skipping path because it's not an included path: {:?}",
-                            fname
-                        );
-                        continue;
+                        if self.include_as_paths.iter().any(|incl| filename_is_match(incl, &matchable_path)) {
+                            log::warn!("Path did not match an include pattern, but did match exactly. Including: {:?}", fname);
+                        }  else {
+                            log::debug!(
+                                "Skipping path because it's not an included path: {:?}",
+                                fname
+                            );
+                            continue;
+                        }
                     }
                 }
 
-                if exclude.is_match(&matchable_path) {
-                    log::debug!("Skipping path because of exclude: {:?}", fname);
-                    continue;
-                }
                 if fname == encode_dir {
                     continue;
+                } else if exclude.is_match(&matchable_path) {
+                    log::debug!("Skipping path because of exclude: {:?}", fname);
+                    continue;
+                } else if self.exclude_as_paths.iter().any(|incl| filename_is_match(incl, &matchable_path)) {
+                    log::warn!("Path did not match an exclude as a pattern, but did match exactly. Excluding: {:?}", fname);
+                    continue;
                 }
+
                 let md = entry.metadata()?;
                 if md.is_dir() {
                     dirs.push_back(fname);
-                } else {
-                    let extension = fname
-                        .extension()
-                        .map(|ext| -> Result<_> {
-                            ext.to_ascii_lowercase()
-                                .to_str()
-                                .map(|s| s.to_string())
-                                .ok_or(anyhow!("Path can't be represented as utf-8: {:?}", &fname))
-                        })
-                        .transpose()?;
-
-                    match extension {
-                        Some(extension) if video_re.is_match(&extension) => {
-                            videos.push(InputFile::new(&fname, self.args.clone()).await?)
-                        }
-                        _ => {}
-                    }
+                } else if extension_matches(&fname, &video_re)? {
+                    videos.push(InputFile::new(&fname, self.args.clone()).await?);
                 }
             }
         }
 
         Ok(videos)
     }
+}
+
+fn extension_matches(fname: &PathBuf, video_re: &Regex) -> Result<bool> {
+    if let Some(extension) = fname.extension() {
+        let extension = extension.to_ascii_lowercase().to_str()
+            .map(|s| s.to_string())
+            .ok_or(anyhow!("Path can't be represented as utf-8: {:?}", &fname))?;
+        return Ok(video_re.is_match(&extension));
+    }
+    return Ok(false);
+}
+
+fn filename_is_match(pattern: &PathBuf, matchable_path: &PathBuf) -> bool {
+    if let Ok(canonical_pattern) = pattern.canonicalize() {
+        if let Ok(canonical_path) = matchable_path.canonicalize() {
+            if canonical_path == canonical_pattern {
+                return true;
+            }
+        }
+    }
+
+    let pattern_comps = pattern.components();
+    let path_comps = matchable_path.components();
+    if pattern_comps.clone().count() > path_comps.clone().count() {
+        return false;
+    }
+
+    return pattern_comps.rev().zip(path_comps.rev()).all(|(a, b)| a == b);
 }
 
 fn find_executable(executable: Executable) -> Result<OsString> {
