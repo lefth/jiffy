@@ -93,13 +93,13 @@ pub struct Args {
     )]
     pub eight_bit: bool,
 
-    /// The encoding preset to use--by default this is fairly slow. By default, "6" for libaom,
+    /// The encoding preset to use--by default this is fairly slow. By default, "5" for libaom,
     /// "slow" for x265.
     #[clap(
         verbatim_doc_comment,
         long,
         hide_default_value = true,
-        default_value = "6",
+        default_value = "5",
         default_value_if("reference", "true", "veryfast"),
         default_value_if("x265", "true", "slow"),
         default_value_if("for_tv", "true", "fast")
@@ -837,7 +837,7 @@ fn test_output_fname() {
         .unwrap();
     assert_eq!(
         input.get_output_path().unwrap(),
-        PathBuf::from("a/b/encoded/vid.en-6-crf24.mp4")
+        PathBuf::from("a/b/encoded/vid.en-5-crf24.mp4")
     );
     assert_eq!(
         input.log_path,
@@ -916,7 +916,7 @@ fn test_preset() -> Result<()> {
     let args = &Args::parse_from(["prog_name"]);
     assert_eq!(args.x265, false);
     assert_eq!(args.eight_bit, false);
-    assert_eq!(args.preset, "6");
+    assert_eq!(args.preset, "5");
     let args = &Args::parse_from(["prog_name", "--preset=3"]);
     assert_eq!(args.preset, "3");
     let args = &Args::parse_from(["prog_name", "--for-tv"]);
