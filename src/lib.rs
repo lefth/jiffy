@@ -700,8 +700,10 @@ impl Encoder {
                     }
                 }
                 let fname = entry.path();
+                let relative_path = pathdiff::diff_paths(fname.clone(), self.video_root.clone());
+                let matchable_path = relative_path.unwrap_or(fname.clone());
                 if let Some(include) = &include {
-                    if !include.is_match(&fname) {
+                    if !include.is_match(&matchable_path) {
                         log::debug!(
                             "Skipping path because it's not an included path: {:?}",
                             fname
@@ -709,7 +711,8 @@ impl Encoder {
                         continue;
                     }
                 }
-                if exclude.is_match(&fname) {
+
+                if exclude.is_match(&matchable_path) {
                     log::debug!("Skipping path because of exclude: {:?}", fname);
                     continue;
                 }
