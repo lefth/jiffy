@@ -220,7 +220,7 @@ impl Args {
         Ok(jobs)
     }
 
-    pub(crate) fn get_extra_flags(&self) -> Result<Vec<String>> {
+    fn get_extra_flags(&self) -> Result<Vec<String>> {
         let whitespace_re = Regex::new(r"\s+")?;
         Ok(self
             .extra_flag
@@ -228,6 +228,44 @@ impl Args {
             .flat_map(|extra_flag| {
                 // Split once on space, or leave as is if there's no space:
                 whitespace_re.splitn(extra_flag, 2).map(String::from)
+            })
+            .collect())
+    }
+
+    pub(crate) fn get_extra_normal_flags(&self) -> Result<Vec<String>> {
+        let raw = self.get_extra_flags()?;
+        // Combine these to detect -vf and the arg together:
+        // [-vf     hflip           ]
+        // [        -vf        hflip]
+        Ok(raw
+            .iter()
+            .chain(["".to_string()].iter())
+            .zip(["".to_string()].iter().chain(raw.iter()))
+            .filter_map(|(arg, prev_arg)| {
+                if arg != "" && arg != "-vf" && prev_arg != "-vf" {
+                    Some(arg.to_owned())
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+
+    pub(crate) fn get_extra_vf_flags(&self) -> Result<Vec<String>> {
+        let raw = self.get_extra_flags()?;
+        // Combine these to detect -vf and the arg together:
+        // [-vf     hflip           ]
+        // [        -vf        hflip]
+        Ok(raw
+            .iter()
+            .chain(["".to_string()].iter())
+            .zip(["".to_string()].iter().chain(raw.iter()))
+            .filter_map(|(arg, prev_arg)| {
+                if prev_arg == "-vf" {
+                    Some(arg.to_owned())
+                } else {
+                    None
+                }
             })
             .collect())
     }
@@ -421,6 +459,7 @@ impl Encoder {
                 "format=yuv420p10le".into()
             };
             vf.extend([vf_height, vf_pix_fmt]);
+            vf.extend(self.args.get_extra_vf_flags()?.iter().map(|s| s.into()));
 
             // Transform list into string:
             let vf = {
@@ -455,7 +494,7 @@ impl Encoder {
             child_args.extend(env_ffmpeg_args.split_whitespace().map(OsString::from));
         }
 
-        child_args.extend(self.args.get_extra_flags()?.iter().map(|s| s.into()));
+        child_args.extend(self.args.get_extra_normal_flags()?.iter().map(|s| s.into()));
         match env::var("FFMPEG_FLAGS") {
             Ok(env_args) => {
                 child_args.extend(env_args.to_string().split_whitespace().map(|s| s.into()));
@@ -933,17 +972,37 @@ fn test_extra_flags() -> Result<()> {
     let args = &Args::parse_from([
         "prog_name",
         "--extra-flag",
+        "-vf hflip",
+        "--extra-flag",
         "-ss 30",
+        "--extra-flag=-vf bwdif",
         "--extra-flag=-t 5:00",
     ]);
-    let extra_flags = args.get_extra_flags()?;
-    assert_eq!(
-        extra_flags,
-        ["-ss", "30", "-t", "5:00"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-    );
+
+    let correct_extra_flags = ["-ss", "30", "-t", "5:00"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    let correct_extra_vf_flags = ["hflip", "bwdif"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(args.get_extra_normal_flags()?, correct_extra_flags);
+    assert_eq!(args.get_extra_vf_flags()?, correct_extra_vf_flags);
+
+    let args = &Args::parse_from([
+        "prog_name",
+        "--extra-flag",
+        "-ss 30",
+        "--extra-flag",
+        "-vf hflip",
+        "--extra-flag=-t 5:00",
+        "--extra-flag=-vf bwdif",
+    ]);
+
+    assert_eq!(args.get_extra_normal_flags()?, correct_extra_flags);
+    assert_eq!(args.get_extra_vf_flags()?, correct_extra_vf_flags);
 
     Ok(())
 }

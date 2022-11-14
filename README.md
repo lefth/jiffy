@@ -73,7 +73,7 @@ Note that non-alphanumeric characters and leading numbers should be replaced by 
 ```
 FFMPEG_video_20200104_mp4="--enable-dnl-denoising=0 --denoise-noise-level=8"
 FFMPEG_video_20220101_mp4="-ss 15 -to 2:30" VF_video_20220101_mp4="eq=brightness=0.06:saturation=2"
-VF_video_20200104_mp4=hflip,vflip
+VF_video_20200104_mp4=hflip,vflip,bwdif
 ```
 
 ## Installation
