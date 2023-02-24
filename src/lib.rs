@@ -42,23 +42,23 @@ pub struct Args {
     /// Set the quality level (for either encoded). The default is 24 for AV1 and 22 for H265, but
     /// if unspecified, a better CRF may be used for small videos, or a lower quality CRF may be
     /// used for animation.
-    #[clap(verbatim_doc_comment, long)]
+    #[clap(long)]
     crf: Option<u8>,
 
     /// Use x265 instead of aom-av1. This is true by default with --animation.
-    #[clap(verbatim_doc_comment, long, alias = "h265", conflicts_with_all = ["av1", "reference"])]
+    #[clap(long, alias = "h265", conflicts_with_all = ["av1", "reference"])]
     x265: bool,
 
     /// Use x264 to make a high quality (high space) fast encode.
-    #[clap(verbatim_doc_comment, long, conflicts_with_all = ["av1", "x265"])]
+    #[clap(long, conflicts_with_all = ["av1", "x265"])]
     reference: bool,
 
     /// Use libaom-av1 for encoding. This is the default, except for animation.
-    #[clap(verbatim_doc_comment, long = "av1", aliases = ["aom", "libaom", "aom-av1"])]
+    #[clap(long = "av1", aliases = ["aom", "libaom", "aom-av1"])]
     av1: bool,
 
     /// Use settings that work well for anime or animation.
-    #[clap(verbatim_doc_comment, long = "animation", alias = "anime",
+    #[clap(long = "animation", alias = "anime",
         default_value_ifs = [
             ("anime_slow_well_lit", "true", "true"),
             ("anime_mixed_dark_battle", "true", "true"),
@@ -67,25 +67,24 @@ pub struct Args {
     anime: bool,
 
     /// Use this setting for slow well lit anime, like slice of life:
-    #[clap(verbatim_doc_comment, long, conflicts_with_all = ["av1", "anime_mixed_dark_battle", "reference"])]
+    #[clap(long, conflicts_with_all = ["av1", "anime_mixed_dark_battle", "reference"])]
     anime_slow_well_lit: bool,
 
     /// Use this setting for anime with some dark scenes, some battle scenes (shonen, historical, etc.)
-    #[clap(verbatim_doc_comment, long, conflicts_with_all = ["av1", "anime_slow_well_lit", "reference"])]
+    #[clap(long, conflicts_with_all = ["av1", "anime_slow_well_lit", "reference"])]
     anime_mixed_dark_battle: bool,
 
     /// Encode this many videos in parallel. The default varies per encoder.
-    #[clap(verbatim_doc_comment, long, short, alias = "max-jobs")]
+    #[clap(long, short, alias = "max-jobs")]
     jobs: Option<usize>,
 
     /// Encode as 720p. Otherwise the video will be 1080p. The source size is taken into
     /// consideration; in no case is a video scaled up.
-    #[clap(verbatim_doc_comment, long = "720p")]
+    #[clap(long = "720p")]
     height_720p: bool,
 
     /// Encode as 8-bit. Otherwise the video will be 10-bit.
     #[clap(
-        verbatim_doc_comment,
         long = "8-bit",
         alias = "8bit",
         default_value_if("for_tv", "true", "true"),
@@ -96,7 +95,6 @@ pub struct Args {
     /// The encoding preset to use--by default this is fairly slow. By default, "5" for libaom,
     /// "slow" for x265.
     #[clap(
-        verbatim_doc_comment,
         long,
         hide_default_value = true,
         default_value = "5",
@@ -107,24 +105,23 @@ pub struct Args {
     pub preset: String,
 
     /// Overwrite existing output files
-    #[clap(verbatim_doc_comment, long)]
+    #[clap(long)]
     pub overwrite: bool,
 
     /// Add additional ffmpeg flags, such as "-to 5:00" to quickly test the first few minutes of a
     /// file.  Each option should be passed separately, for example:
     /// `jiffy --extra-flag='-ss 30' --extra-flag='-t 5:00'`
-    #[clap(verbatim_doc_comment, long, allow_hyphen_values(true))]
+    #[clap(long, allow_hyphen_values(true))]
     pub extra_flag: Vec<String>,
 
     /// Don't write log files for each ffmpeg invocation. This avoids polluting your output
     /// directory with a log file per input.
-    #[clap(verbatim_doc_comment, long, short)]
+    #[clap(long, short)]
     pub no_log: bool,
 
     /// Don't check if the audio streams are within acceptable limits--just reencode them (unless
     /// `--copy-audio` was specified). This saves a little time in some circumstances.
     #[clap(
-        verbatim_doc_comment,
         long = "skip-bitrate-check",
         default_value_if("copy_streams", "true", "true"),
         default_value_if("no_audio", "true", "true")
@@ -132,50 +129,46 @@ pub struct Args {
     pub skip_audio_bitrate_check: bool,
 
     /// Keep the audio stream unchanged. This is useful if audio bitrate can't be determined.
-    #[clap(
-        verbatim_doc_comment,
-        long = "copy-audio",
-        default_value_if("copy_streams", "true", "true")
-    )]
+    #[clap(long = "copy-audio", default_value_if("copy_streams", "true", "true"))]
     pub copy_audio: bool,
 
     /// Copy audio and video streams (don't encode). Used for testing, for example passing
     /// `--copy-streams --extra-flag='-to 30'` would copy a 30 second from each video. Implies
     /// `--copy-audio`.
-    #[clap(verbatim_doc_comment, long = "copy-streams", conflicts_with_all = ["av1", "x265", "reference", "for_tv", "height_720p",
+    #[clap(long = "copy-streams", conflicts_with_all = ["av1", "x265", "reference", "for_tv", "height_720p",
         "anime", "anime_mixed_dark_battle", "anime_slow_well_lit", "crf", "preset"])]
     pub copy_streams: bool,
 
     /// For testing and benchmarking.
-    #[clap(verbatim_doc_comment, long = "no-audio", conflicts_with = "copy_audio")]
+    #[clap(long = "no-audio", conflicts_with = "copy_audio")]
     pub no_audio: bool,
 
     /// Encode the videos in this directory. By default, encode in the current directory. Output
     /// files are put in "video_root/encoded". If the given path ends in "encoded", the real video
     /// root is taken to be the parent directory.
-    #[clap(verbatim_doc_comment, default_value = ".", hide_default_value = true)]
+    #[clap(default_value = ".", hide_default_value = true)]
     pub video_root: PathBuf,
 
     /// Paths (usually glob patterns) that can be excluded. They match from the video encode root.
     /// For example, "*S01*/*E01*" might be used to skip the first episode of a TV show, and
     /// "**/*E01*" would skip the first episode of each season. This argument must be given once
     /// per exclude pattern.  See the `--include` option.
-    #[clap(verbatim_doc_comment, long)]
+    #[clap(long)]
     pub exclude: Vec<String>,
 
     /// Paths (usually glob patterns) to be included; all others are excluded. They match from the
     /// video encode root. If `--include` and `--exclude` are both given, only those that are
     /// matched by the include globs and not matched by the exclude globs will be encoded.  See the
     /// `--exclude` option.
-    #[clap(verbatim_doc_comment, long)]
+    #[clap(long)]
     pub include: Vec<String>,
 
     /// Run ffmpeg without `-map 0`. This occasionally fixes an encoding error.
-    #[clap(verbatim_doc_comment, long, default_value_if("for_tv", "true", "true"))]
+    #[clap(long, default_value_if("for_tv", "true", "true"))]
     pub no_map_0: bool,
 
     /// Encode a certain number of files, then stop.
-    #[clap(verbatim_doc_comment, long)]
+    #[clap(long)]
     pub limit: Option<usize>,
 
     /// Make a high quality but inefficient file for low spec televisions. The output is intended
@@ -184,7 +177,7 @@ pub struct Args {
     /// without the need for transcoding.
     // If you find this option is not compatible with your TV, please let me know what model and what encoding
     // options do work.
-    #[clap(verbatim_doc_comment, long = "for-tv", conflicts_with_all = ["av1", "x265", "reference", "anime", "anime_slow_well_lit", "anime_mixed_dark_battle"])]
+    #[clap(long = "for-tv", conflicts_with_all = ["av1", "x265", "reference", "anime", "anime_slow_well_lit", "anime_mixed_dark_battle"])]
     pub for_tv: bool,
 }
 
