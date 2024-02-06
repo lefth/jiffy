@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+use lexical_sort;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -683,7 +684,7 @@ impl Encoder {
                 entries.push(entry?);
             }
             entries.sort_by(|s1, s2| {
-                human_sort::compare(&s1.path().to_string_lossy(), &s2.path().to_string_lossy())
+                lexical_sort::natural_lexical_cmp(&s1.path().to_string_lossy(), &s2.path().to_string_lossy())
             });
             for entry in entries {
                 if let Some(limit) = self.args.limit {
