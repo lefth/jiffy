@@ -1,16 +1,8 @@
 use std::{
-    cmp::max,
-    collections::VecDeque,
-    env,
-    ffi::OsString,
-    io::Write,
-    path::{Path, PathBuf},
-    pin::Pin,
-    sync::{
+    cmp::max, collections::VecDeque, env, ffi::OsString, io::Write, path::{Path, PathBuf}, pin::Pin, sync::{
         mpsc::{channel, Sender},
         Arc,
-    },
-    time::Duration,
+    }, time::Duration
 };
 
 use lexical_sort;
@@ -50,7 +42,7 @@ pub struct Args {
     #[clap(long, alias = "h265", conflicts_with_all = ["av1", "reference"])]
     x265: bool,
 
-    /// Use x264 to make a high quality (high space) fast encode.
+    /// Use x264 to make a high quality (high disk space) fast encode.
     #[clap(long, conflicts_with_all = ["av1", "x265"])]
     reference: bool,
 
@@ -181,6 +173,12 @@ pub struct Args {
     // options do work.
     #[clap(long = "for-tv", conflicts_with_all = ["av1", "x265", "reference", "anime", "anime_slow_well_lit", "anime_mixed_dark_battle"])]
     pub for_tv: bool,
+
+    /// If a certain size reduction is expected, this option will warn about
+    /// videos that do not reach that target. For example, 75 if file size is
+    /// expected to be reduced by 25%. This option does not affect encoding.
+    #[clap(long, value_parser = clap::value_parser!(u8).range(1..100))]
+    expected_size: Option<u8>,
 }
 
 impl Args {
@@ -350,7 +348,7 @@ impl Encoder {
         Ok(())
     }
 
-    async fn encode_video(&self, input: &InputFile, failure_tx: Sender<PathBuf>) -> Result<()> {
+    async fn encode_video(&self, input: &InputFile, failure_tx: Sender<(PathBuf, String)>) -> Result<()> {
         let output_fname = input.get_output_path()?;
         let parent = output_fname
             .parent()
@@ -372,7 +370,7 @@ impl Encoder {
         let mut vf = Vec::<OsString>::new();
 
         child_args.extend(os_args!(
-        str: "-nostdin -map_metadata 0 -movflags +faststart -movflags +use_metadata_tags -strict experimental"));
+            str: "-nostdin -map_metadata 0 -movflags +faststart -movflags +use_metadata_tags -strict experimental"));
         let codec = self.args.get_video_codec();
         if codec != Codec::Copy {
             child_args.extend(os_args!["-crf", input.crf.to_string()]);
@@ -538,6 +536,10 @@ impl Encoder {
             // .stderr(process::Stdio::piped())
             .spawn()?;
 
+        // Store the input file size in advance, because the user can delete the input file on Unix filesystems
+        // after the encode begins. But don't return now because this is notfatal:
+        let orig_size = get_file_size(&input.path);
+
         let mut child_stdout = child.stdout.take().unwrap();
         let mut child_stdout = Pin::new(&mut child_stdout);
         // let mut stderr = Box::new(child.stderr.take().unwrap()) as Box<dyn Read>;
@@ -568,7 +570,18 @@ impl Encoder {
                             ", or try again without `-map 0`"
                         }
                     );
-                    failure_tx.send(input.path.to_owned()).unwrap();
+                    failure_tx.send((input.path.to_owned(), String::from("Encoder returned failure"))).unwrap();
+                }
+
+                if let Some(expected_size) = self.args.expected_size {
+                    let size = get_file_size(&output_fname).context("Could not get file size after encoding")?;
+                    let orig_size = orig_size.context("Could not get original file disk space before encoding")?;
+                    let percent = size * 100 / orig_size;
+                    if percent > expected_size.into() {
+                        failure_tx.send((input.path.to_owned(), format!("Output file was larger than expected at {percent}%"))).unwrap();
+                    } else if percent < (expected_size / 3).into() {
+                        failure_tx.send((input.path.to_owned(), format!("Output file was much smaller than expected at {percent}%"))).unwrap();
+                    }
                 }
                 break;
             }
@@ -708,7 +721,7 @@ impl Encoder {
                     if !include.is_match(&matchable_path) {
                         if self.include_as_paths.iter().any(|incl| filename_is_match(incl, &matchable_path)) {
                             log::warn!("Path did not match an include pattern, but did match exactly. Including: {:?}", fname);
-                        }  else {
+                        } else {
                             log::debug!(
                                 "Skipping path because it's not an included path: {:?}",
                                 fname
@@ -738,6 +751,18 @@ impl Encoder {
         }
 
         Ok(videos)
+    }
+}
+
+fn get_file_size(output_fname: &PathBuf) -> Result<u64> {
+    let md = output_fname.metadata()?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::MetadataExt;
+        return Ok(md.size());
+    }
+    #[cfg(windows)] {
+        use std::os::windows::fs::MetadataExt;
+        return Ok(md.file_size());
     }
 }
 
