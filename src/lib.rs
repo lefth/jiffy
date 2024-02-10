@@ -380,23 +380,15 @@ impl Encoder {
         }
 
         if self.args.for_tv {
-            if input.get_has_subtitles().await? {
-                // TODO: move the subtitles to a temp file so the name doesn't need to be escaped:
-                // (Don't literally move them; use dump_stream to temp.ass)
-
-                let sub_path = escape_vf_path(
-                    input
-                        .path
-                        .to_str()
-                        .context("Could not convert video path to utf-8. Needed for subtitles.")?,
-                );
-                let mut subs_option = OsString::from("subtitles=");
-                subs_option.push(sub_path?);
-                vf.push(subs_option);
+            if input.contains_subtitle().await? {
+                if let Err(err) = add_subtitles(input, &mut vf).await
+                {
+                    failure_tx.send((input.path.to_owned(), format!("Error adding subtitles: {err:?}")))?;
+                }
 
                 // And don't include the existing soft subs:
                 child_args.push("-sn".into());
-            } else if let Some(sub_path) = try_find_subs(input)? {
+            } else if let Some(sub_path) = find_subtitle_file(input)? {
                 let sub_path = sub_path
                     .to_str()
                     .context("Could not convert subtitle name to utf-8.")?
@@ -749,6 +741,21 @@ impl Encoder {
     }
 }
 
+async fn add_subtitles(input: &InputFile, vf_opts: &mut Vec<OsString>) -> Result<()> {
+    let sub_file = tempfile::Builder::new()
+        .suffix(".ass")
+        .tempfile()?;
+    let sub_path = sub_file.path();
+    let escaped_sub_path = escape_vf_path(
+        sub_path
+        .to_str()
+        .context("Could not convert temp path to utf-8. Needed for subtitles.")?,
+    )?;
+    dump_stream(&input.path, sub_path, false).await?;
+    vf_opts.push(OsString::from(format!("subtitles={escaped_sub_path}")));
+    Ok(())
+}
+
 fn get_file_size(output_fname: &PathBuf) -> Result<u64> {
     let md = output_fname.metadata()?;
     #[cfg(unix)] {
@@ -828,7 +835,7 @@ fn escape_vf_path(sub_path: &str) -> Result<String> {
     Ok(sub_path.to_string())
 }
 
-fn try_find_subs(input: &InputFile) -> Result<Option<PathBuf>> {
+fn find_subtitle_file(input: &InputFile) -> Result<Option<PathBuf>> {
     let srt_name = input
         .path
         .with_extension("srt")

@@ -272,7 +272,7 @@ impl InputFile {
         Ok(sum)
     }
 
-    pub async fn get_has_subtitles(&self) -> Result<bool> {
+    pub async fn contains_subtitle(&self) -> Result<bool> {
         let ffmpeg = find_executable(Executable::FFMPEG)?;
         let status = Command::new(ffmpeg)
             .arg("-i")
