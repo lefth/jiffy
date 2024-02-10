@@ -76,7 +76,8 @@ pub struct Args {
     #[clap(long = "720p")]
     height_720p: bool,
 
-    /// Encode as 8-bit. Otherwise the video will be 10-bit.
+    /// Encode as 8-bit. Otherwise the video will be 10-bit, except if creating
+    /// a file as reference or for TV.
     #[clap(
         long = "8-bit",
         alias = "8bit",
@@ -339,15 +340,16 @@ impl Encoder {
 
         let failures: Vec<_> = failures.try_iter().collect();
         if failures.len() > 0 {
-            log::warn!("Failure summary:");
-            for failed_path in failures {
-                log::warn!("Failed to encode: {:?}", &failed_path);
+            log::warn!("Failure and warning summary:");
+            for (path, msg) in failures {
+                log::warn!("{}: {}", path.to_string_lossy(), msg);
             }
         }
 
         Ok(())
     }
 
+    /// Multiple failure messages may be sent along the tx.
     async fn encode_video(&self, input: &InputFile, failure_tx: Sender<(PathBuf, String)>) -> Result<()> {
         let output_fname = input.get_output_path()?;
         let parent = output_fname
@@ -355,10 +357,7 @@ impl Encoder {
             .expect("Generated path must have a parent directory");
         if !parent.is_dir() {
             if parent.exists() {
-                bail!(
-                    "Cannot encode file to {:?} because the parent exists but is not a directory.",
-                    &output_fname
-                );
+                bail!("Cannot encode file to {output_fname:?} because the parent exists but is not a directory.");
             }
             // No need for a mutex, this is thread-safe:
             std::fs::create_dir_all(parent)?;
@@ -425,6 +424,9 @@ impl Encoder {
 
         if self.args.overwrite {
             child_args.extend(os_args!["-y"]);
+        } else if output_fname.exists() {
+            failure_tx.send((output_fname.to_owned(), format!("Output path already exists: {output_fname:?}")))?;
+            return Ok(());
         }
 
         // Add the codec-specific flags:
@@ -447,11 +449,7 @@ impl Encoder {
             // This -vf argument string was pretty thoroughly tested: it makes the shorter dimension equivalent to
             // the desired height (or width for portrait mode), without changing the aspect ratio, and without upscaling.
             // Using -2 instead of -1 ensures that the scaled dimension will be a factor of 2. Some filters need that.
-            let vf_height = format!(
-                "scale=if(gte(iw\\,ih)\\,-2\\,min({}\\,iw)):if(gte(iw\\,ih)\\,min({}\\,ih)\\,-2)",
-                max_height, max_height
-            )
-            .into();
+            let vf_height = format!("scale=if(gte(iw\\,ih)\\,-2\\,min({max_height}\\,iw)):if(gte(iw\\,ih)\\,min({max_height}\\,ih)\\,-2)").into();
             let vf_pix_fmt: OsString = if self.args.eight_bit {
                 "format=yuv420p".into()
             } else {
@@ -500,11 +498,7 @@ impl Encoder {
             }
             Err(env::VarError::NotPresent) => {}
             Err(err) => {
-                _warn!(
-                    input,
-                    "Could not get extra ffmpeg args from FFMPEG_FLAGS: {}",
-                    err,
-                );
+                _warn!(input, "Could not get extra ffmpeg args from FFMPEG_FLAGS: {err}");
             }
         }
 
@@ -560,27 +554,35 @@ impl Encoder {
 
             if let Some(exit_status) = exit_status {
                 if !exit_status.success() {
-                    _warn!(
-                        input,
-                        "Error encoding {:?}. Check ffmpeg args{}",
-                        input.path,
-                        if self.args.no_map_0 {
-                            ""
-                        } else {
-                            ", or try again without `-map 0`"
-                        }
-                    );
-                    failure_tx.send((input.path.to_owned(), String::from("Encoder returned failure"))).unwrap();
+                    let mut msg = format!("Error encoding {:?}. Check ffmpeg args", input.path);
+                    if !self.args.no_map_0 {
+                        msg = msg + ", or try again without `-map 0`";
+                    }
+                    // This error is significant enough to show right away, not just at the end:
+                    _warn!(input, "{msg}");
+                    failure_tx.send((input.path.to_owned(), msg)).unwrap();
                 }
 
                 if let Some(expected_size) = self.args.expected_size {
-                    let size = get_file_size(&output_fname).context("Could not get file size after encoding")?;
-                    let orig_size = orig_size.context("Could not get original file disk space before encoding")?;
+                    let size = match get_file_size(&output_fname) {
+                        Ok(size) => size,
+                        Err(err) => {
+                            failure_tx.send((input.path.to_owned(), format!("Could not get file size after encoding: {err:?}")))?;
+                            break;
+                        },
+                    };
+                    let orig_size = match orig_size {
+                        Ok(orig_size) => orig_size,
+                        Err(err) => {
+                            failure_tx.send((input.path.to_owned(), format!("Could not get original file disk space before encoding: {err:?}")))?;
+                            break;
+                        },
+                    };
                     let percent = size * 100 / orig_size;
                     if percent > expected_size.into() {
-                        failure_tx.send((input.path.to_owned(), format!("Output file was larger than expected at {percent}%"))).unwrap();
+                        failure_tx.send((input.path.to_owned(), format!("Output file was larger than expected at {percent}%: {output_fname:?}"))).unwrap();
                     } else if percent < (expected_size / 3).into() {
-                        failure_tx.send((input.path.to_owned(), format!("Output file was much smaller than expected at {percent}%"))).unwrap();
+                        failure_tx.send((input.path.to_owned(), format!("Output file was much smaller than expected at {percent}%: {output_fname:?}"))).unwrap();
                     }
                 }
                 break;
@@ -614,17 +616,13 @@ impl Encoder {
         }
         match input.get_audio_bitrate().await {
             Ok(bitrate) if bitrate <= 200f32 => {
-                _debug!(
-                    input,
-                    "Audio bitrate is {} kb/s. Will not reencode",
-                    bitrate
-                );
+                _debug!(input, "Audio bitrate is {bitrate} kb/s. Will not reencode");
                 return audio_copy_arg;
             }
             Ok(bitrate) => {
-                _trace!(input, "Audio bitrate is {} kb/s. Will reencode", bitrate);
+                _trace!(input, "Audio bitrate is {bitrate} kb/s. Will reencode");
             }
-            Err(err) => _warn!(input, "Could not get audio bitrate: {}", err),
+            Err(err) => _warn!(input, "Could not get audio bitrate: {err}"),
         }
         return default;
     }
@@ -709,7 +707,7 @@ impl Encoder {
             for entry in entries {
                 if let Some(limit) = self.args.limit {
                     if videos.len() == limit {
-                        log::debug!("Reached video limit={}, won't encode any more", limit);
+                        log::debug!("Reached video limit={limit}, won't encode any more");
                         return Ok(videos);
                     }
                 }
@@ -720,12 +718,9 @@ impl Encoder {
                 if let Some(include) = &include {
                     if !include.is_match(&matchable_path) {
                         if self.include_as_paths.iter().any(|incl| filename_is_match(incl, &matchable_path)) {
-                            log::warn!("Path did not match an include pattern, but did match exactly. Including: {:?}", fname);
+                            log::warn!("Path did not match an include pattern, but did match exactly. Including: {fname:?}");
                         } else {
-                            log::debug!(
-                                "Skipping path because it's not an included path: {:?}",
-                                fname
-                            );
+                            log::debug!("Skipping path because it's not an included path: {fname:?}");
                             continue;
                         }
                     }
@@ -734,10 +729,10 @@ impl Encoder {
                 if fname == encode_dir {
                     continue;
                 } else if exclude.is_match(&matchable_path) {
-                    log::debug!("Skipping path because of exclude: {:?}", fname);
+                    log::debug!("Skipping path because of exclude: {fname:?}");
                     continue;
                 } else if self.exclude_as_paths.iter().any(|incl| filename_is_match(incl, &matchable_path)) {
-                    log::warn!("Path did not match an exclude as a pattern, but did match exactly. Excluding: {:?}", fname);
+                    log::warn!("Path did not match an exclude as a pattern, but did match exactly. Excluding: {fname:?}");
                     continue;
                 }
 
@@ -817,10 +812,7 @@ async fn dump_stream(input_path: &Path, output_path: &Path, copy: bool) -> Resul
     let cmd = if copy { cmd.args(["-c", "copy"]) } else { cmd };
     let status = cmd.arg(output_path).status().await?;
     if !status.success() {
-        warn!(
-            "Could not convert path {:?} to {:?}",
-            input_path, output_path
-        )
+        warn!( "Could not convert path {input_path:?} to {output_path:?}");
     }
     Ok(())
 }
