@@ -202,7 +202,7 @@ impl Args {
             }
             None => {
                 if self.x265 {
-                    max(1, num_cpus::get_physical() / 3)
+                    max(1, (num_cpus::get_physical() as f64 / 3f64).round() as usize)
                 } else {
                     max(1, num_cpus::get_physical() / 2)
                 }
