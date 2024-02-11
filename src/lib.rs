@@ -191,6 +191,12 @@ pub struct Args {
     /// it's taken to mean megabytes.
     #[clap(long)]
     pub minimum_size: Option<String>,
+
+    /// Output files will be written with this name. Fields that will be filled:
+    /// {preset}, {basename}, {crf}
+    /// For example: --output-name "{basename}-crf{crf}"
+    #[clap(long, aliases = ["output-format", "name-format", "naming-format"])]
+    pub output_name: Option<String>,
 }
 
 impl Args {
@@ -374,7 +380,7 @@ impl Encoder {
 
     /// Multiple failure messages may be sent along the tx.
     async fn encode_video_inner(&self, input: &InputFile, failure_tx: Sender<(PathBuf, String)>) -> Result<()> {
-        let output_path = input.get_output_path()?;
+        let output_path = input.get_output_path(self.args.output_name.clone())?;
         let parent = output_path
             .parent()
             .expect("Generated path must have a parent directory");
@@ -993,6 +999,14 @@ fn test_crf() {
 }
 
 #[test]
+fn test_fill_output_template() {
+    assert_eq!(InputFile::fill_output_template("{basename}-{preset}-{crf}", PathBuf::from("dir"), "foo", "preset", "crf", "avi"),
+        PathBuf::from("dir/foo-preset-crf.avi"));
+    assert_eq!(InputFile::fill_output_template("{basename}", PathBuf::from("dir"), "foo", "preset", "crf", "avi"),
+        PathBuf::from("dir/foo.avi"));
+}
+
+#[test]
 fn test_output_fname() {
     use tokio::runtime::Runtime;
 
@@ -1003,8 +1017,16 @@ fn test_output_fname() {
         .block_on(InputFile::new(Path::new("a/b/vid.en.MP4"), args))
         .unwrap();
     assert_eq!(
-        input.get_output_path().unwrap(),
+        input.get_output_path(None).unwrap(),
         PathBuf::from("a/b/encoded/vid.en-5-crf24.mp4")
+    );
+    assert_eq!(
+        input.get_output_path(Some(String::from("{basename}-{preset}-crf{crf}"))).unwrap(),
+        PathBuf::from("a/b/encoded/vid.en-5-crf24.mp4")
+    );
+    assert_eq!(
+        input.get_output_path(Some(String::from("{basename}-crf{crf}"))).unwrap(),
+        PathBuf::from("a/b/encoded/vid.en-crf24.mp4")
     );
     assert_eq!(
         input.log_path,
@@ -1019,7 +1041,7 @@ fn test_output_fname() {
         ))
         .unwrap();
     assert_eq!(
-        input.get_output_path().unwrap(),
+        input.get_output_path(None).unwrap(),
         PathBuf::from("a/b/encoded/subdir/vid-crf22.mp4")
     );
     assert_eq!(input.log_path, None);
@@ -1028,7 +1050,7 @@ fn test_output_fname() {
         .block_on(InputFile::new(Path::new("a/b/vid.MKV"), args.clone()))
         .unwrap();
     assert_eq!(
-        input.get_output_path().unwrap(),
+        input.get_output_path(None).unwrap(),
         PathBuf::from("a/b/encoded/vid-crf22.mkv")
     );
 
@@ -1038,14 +1060,14 @@ fn test_output_fname() {
             args.clone(),
         ))
         .unwrap();
-    assert!(matches!(input.get_output_path(), Err(_)));
+    assert!(matches!(input.get_output_path(None), Err(_)));
 
     let args = Arc::new(Args::parse_from(["prog_name", "--x265", "--no-log", "/a"]));
     let input = rt
         .block_on(InputFile::new(Path::new("/a/vid.flv"), args.clone()))
         .unwrap();
     assert_eq!(
-        input.get_output_path().unwrap(),
+        input.get_output_path(None).unwrap(),
         PathBuf::from("/a/encoded/vid-crf22.mkv")
     );
 
@@ -1059,7 +1081,7 @@ fn test_output_fname() {
         .block_on(InputFile::new(Path::new("/a/vid.flv"), args.clone()))
         .unwrap();
     assert_eq!(
-        input.get_output_path().unwrap(),
+        input.get_output_path(None).unwrap(),
         PathBuf::from("/a/encoded/vid-crf0.mkv")
     );
 
@@ -1073,7 +1095,7 @@ fn test_output_fname() {
         .block_on(InputFile::new(Path::new("/a/vid.flv"), args.clone()))
         .unwrap();
     assert_eq!(
-        input.get_output_path().unwrap(),
+        input.get_output_path(None).unwrap(),
         PathBuf::from("/a/encoded/vid-crf8.mkv")
     );
 }

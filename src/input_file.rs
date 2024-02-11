@@ -47,38 +47,45 @@ impl InputFile {
             .components()
             .skip(video_root.components().count())
             .collect::<PathBuf>())
+        }
+
+    pub(crate) fn fill_output_template(naming_format: &str, directory: PathBuf, basename: &str, preset: &str, crf: &str, extension: &str) -> PathBuf {
+        let name = naming_format.replace("{basename}", basename);
+        let name = name.replace("{preset}", preset);
+        let name = name.replace("{crf}", crf);
+        // Don't use with_extension() since we must add it, not change it:
+        let name = format!("{name}.{extension}");
+        directory.join(PathBuf::from(name))
     }
 
-    pub(crate) fn get_output_path(&self) -> Result<PathBuf> {
-        let mut output = self
+    pub(crate) fn get_output_path(&self, naming_format: Option<String>) -> Result<PathBuf> {
+        let output_dir = self
             .args
             .video_root
-            .join(ENCODE_DIR)
-            .join(Self::trim_input_path(&self.path, &self.args.video_root)?);
+            .join(ENCODE_DIR);
 
-        let extension = output
+        let extension = self.path
             .extension()
             .map(|extension| extension.to_ascii_lowercase().to_string_lossy().to_string());
-        let is_mp4 = matches!(extension, Some(extension) if extension == "mp4");
         // Let mp4 keep its extension, but change others to mkv:
-        let extension = if is_mp4 { "mp4" } else { "mkv" };
-        output.set_extension("");
-        let mut output = output.into_os_string();
-        if self.args.get_video_codec() == Codec::Av1 {
-            output.push(format!("-{}", self.args.preset));
-        }
-        output.push(format!("-crf{}", self.crf));
+        let extension = match extension.as_deref() {
+            Some("mp4") => "mp4",
+            _ => "mkv",
+        };
 
-        // don't call set_extension because we already removed it, and any
-        // ".something" in the filename will be interpreted as an extension:
-        // let mut output = PathBuf::from(output);
-        //output.set_extension(extension);
+        let basename = Self::trim_input_path(&self.path, &self.args.video_root)?
+            .with_extension("").to_string_lossy().to_string();
 
-        output.push(".");
-        output.push(extension);
-        let output = PathBuf::from(output);
+        let naming_format = naming_format.unwrap_or({
+            if self.args.get_video_codec() == Codec::Av1 {
+                "{basename}-{preset}-crf{crf}"
+            } else {
+                "{basename}-crf{crf}"
+            }.into()
+        });
 
-        Ok(output)
+        Ok(Self::fill_output_template(
+            &naming_format, output_dir, &basename, &self.args.preset, &self.crf.to_string(), extension))
     }
 
     /// Get the log path for this input file. Also create the directory for the log
