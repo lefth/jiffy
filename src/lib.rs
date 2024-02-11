@@ -1,5 +1,5 @@
 use std::{
-    cmp::max, collections::VecDeque, env, ffi::OsString, io::Write, path::{Path, PathBuf}, pin::Pin, sync::{
+    cmp::max, collections::VecDeque, env, ffi::OsString, fs::remove_file, io::Write, path::{Path, PathBuf}, pin::Pin, sync::{
         mpsc::{channel, Sender},
         Arc,
     }, time::Duration
@@ -180,6 +180,12 @@ pub struct Args {
     /// expected to be reduced by 25%. This option does not affect encoding.
     #[clap(long, value_parser = clap::value_parser!(u8).range(1..100))]
     pub expected_size: Option<u8>,
+
+    /// If an output file is larger than expected (or larger than the original),
+    /// it will be deleted. This prevents accidentally re-encoding highly
+    /// compressed videos to lower compression, losing quality in the process.
+    #[clap(long, requires("expected_size"))]
+    pub delete_too_large: bool,
 
     /// Files smaller than this size will be skipped. If there is no suffix,
     /// it's taken to mean megabytes.
@@ -368,13 +374,13 @@ impl Encoder {
 
     /// Multiple failure messages may be sent along the tx.
     async fn encode_video_inner(&self, input: &InputFile, failure_tx: Sender<(PathBuf, String)>) -> Result<()> {
-        let output_fname = input.get_output_path()?;
-        let parent = output_fname
+        let output_path = input.get_output_path()?;
+        let parent = output_path
             .parent()
             .expect("Generated path must have a parent directory");
         if !parent.is_dir() {
             if parent.exists() {
-                bail!("Cannot encode file to {output_fname:?} because the parent exists but is not a directory.");
+                bail!("Cannot encode file to {output_path:?} because the parent exists but is not a directory.");
             }
             // No need for a mutex, this is thread-safe:
             std::fs::create_dir_all(parent)?;
@@ -433,8 +439,8 @@ impl Encoder {
 
         if self.args.overwrite {
             child_args.extend(os_args!["-y"]);
-        } else if output_fname.exists() {
-            failure_tx.send((output_fname.to_owned(), format!("Output path already exists: {output_fname:?}")))?;
+        } else if output_path.exists() {
+            failure_tx.send((output_path.to_owned(), format!("Output path already exists: {output_path:?}")))?;
             return Ok(());
         }
 
@@ -450,7 +456,7 @@ impl Encoder {
                 Codec::H264 if self.args.for_tv =>
                     os_args!(str: "-c:v libx264 -maxrate 10M -bufsize 16M -profile:v high -level 4.1 -preset"),
                 Codec::H264 => os_args!(str: "-c:v libx264 -profile:v high -level 4.1 -preset"),
-                _ => bail!("Codec not handled: {:?}", codec),
+                _ => bail!("Codec not handled: {codec:?}"),
             });
             child_args.push(OsString::from(&self.args.preset));
 
@@ -511,7 +517,7 @@ impl Encoder {
             }
         }
 
-        child_args.extend(os_args![&output_fname]);
+        child_args.extend(os_args![&output_path]);
 
         _info!(input, "");
         _info!(input, "Executing: {:?} {:?}", &self.ffmpeg_path, child_args);
@@ -574,21 +580,7 @@ impl Encoder {
                     failure_tx.send((input.path.to_owned(), msg)).unwrap();
                 }
 
-                if let Some(expected_size) = self.args.expected_size {
-                    let size = match get_file_size(&output_fname) {
-                        Ok(size) => size,
-                        Err(err) => {
-                            failure_tx.send((input.path.to_owned(), format!("Could not get file size after encoding: {err:?}")))?;
-                            break;
-                        },
-                    };
-                    let percent = size * 100 / orig_size;
-                    if percent > expected_size.into() {
-                        failure_tx.send((input.path.to_owned(), format!("Output file was larger than expected at {percent}%: {output_fname:?}"))).unwrap();
-                    } else if percent < (expected_size / 3).into() {
-                        failure_tx.send((input.path.to_owned(), format!("Output file was much smaller than expected at {percent}%: {output_fname:?}"))).unwrap();
-                    }
-                }
+                self.check_encoded_size(orig_size, input.path.clone(), output_path, failure_tx)?;
                 break;
             }
         }
@@ -750,6 +742,34 @@ impl Encoder {
         }
 
         Ok(videos)
+    }
+
+    fn check_encoded_size(&self, orig_size: u64, input_path: PathBuf, output_path: PathBuf, failure_tx: Sender<(PathBuf, String)>) -> Result<()> {
+        let size = get_file_size(&output_path).context("Could not get file size after encoding")?;
+        if size < 300 {
+            failure_tx.send((input_path, format!("Deleting {size} byte output file: {output_path:?}"))).unwrap();
+            remove_file(output_path)?;
+            return Ok(());
+        }
+
+        let percent = size * 100 / orig_size;
+        if let Some(expected_size) = self.args.expected_size {
+            if percent > expected_size.into() {
+                if self.args.delete_too_large {
+                    failure_tx.send((input_path, format!("Deleting too large output file (too large at {percent}%): {output_path:?}"))).unwrap();
+                    remove_file(output_path)?;
+                } else {
+                    failure_tx.send((input_path, format!("Output file was larger than expected at {percent}%: {output_path:?}"))).unwrap();
+                }
+            } else if percent < (expected_size / 3).into() {
+                failure_tx.send((input_path, format!("Output file was much smaller than expected at {percent}%: {output_path:?}"))).unwrap();
+            } else if percent > 100 && self.args.delete_too_large {
+                failure_tx.send((input_path, format!("Deleting output file larger than the original ({percent}%): {output_path:?}"))).unwrap();
+                remove_file(output_path)?;
+            }
+        }
+
+        return Ok(())
     }
 }
 
