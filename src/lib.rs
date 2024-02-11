@@ -288,6 +288,8 @@ enum Executable {
     FFPROBE,
 }
 
+struct EncodingErr(PathBuf, String);
+
 pub struct Encoder {
     args: Arc<Args>,
     exclude_as_paths: Vec<PathBuf>,
@@ -328,7 +330,9 @@ impl Encoder {
         log::trace!("Will start jobs (concurrently)");
         while let Some(finished_task) = tasks_started.next().await {
             log::trace!("Popped a finished a task into the job list (not started)");
-            finished_task?;
+            if let Err(EncodingErr(path, msg)) = finished_task {
+                failure_tx.send((path, msg))?;
+            }
             if let Some(next_task) = tasks_not_started.pop_front() {
                 log::trace!("Pushing another job to be run concurrently");
                 tasks_started.push(next_task);
@@ -349,8 +353,16 @@ impl Encoder {
         Ok(())
     }
 
+    async fn encode_video(&self, input: &InputFile, failure_tx: Sender<(PathBuf, String)>) -> Result<(), EncodingErr> {
+        let input_path = input.path.clone();
+        if let Err(err) = self.encode_video_inner(input, failure_tx).await {
+            return Err(EncodingErr(input_path, format!("{err:?}")));
+        }
+        Ok(())
+    }
+
     /// Multiple failure messages may be sent along the tx.
-    async fn encode_video(&self, input: &InputFile, failure_tx: Sender<(PathBuf, String)>) -> Result<()> {
+    async fn encode_video_inner(&self, input: &InputFile, failure_tx: Sender<(PathBuf, String)>) -> Result<()> {
         let output_fname = input.get_output_path()?;
         let parent = output_fname
             .parent()
@@ -546,12 +558,12 @@ impl Encoder {
 
             if let Some(exit_status) = exit_status {
                 if !exit_status.success() {
-                    let mut msg = format!("Error encoding {:?}. Check ffmpeg args", input.path);
+                    let mut msg = String::from("Encoding error. Check ffmpeg args");
                     if !self.args.no_map_0 {
-                        msg = msg + ", or try again without `-map 0`";
+                        msg += ", or try again without `-map 0`";
                     }
                     // This error is significant enough to show right away, not just at the end:
-                    _warn!(input, "{msg}");
+                    _warn!(input, "{:?}: {}", input.path, msg);
                     failure_tx.send((input.path.to_owned(), msg)).unwrap();
                 }
 
