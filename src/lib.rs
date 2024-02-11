@@ -179,7 +179,12 @@ pub struct Args {
     /// videos that do not reach that target. For example, 75 if file size is
     /// expected to be reduced by 25%. This option does not affect encoding.
     #[clap(long, value_parser = clap::value_parser!(u8).range(1..100))]
-    expected_size: Option<u8>,
+    pub expected_size: Option<u8>,
+
+    /// Files smaller than this size will be skipped. If there is no suffix,
+    /// it's taken to mean megabytes.
+    #[clap(long)]
+    pub minimum_size: Option<String>,
 }
 
 impl Args {
@@ -528,15 +533,17 @@ impl Encoder {
             }
             command = command.env("FFREPORT", ffreport);
         }
+        let orig_size = get_file_size(&input.path)
+            .context(format!("Could not get original file disk space before encoding"))?;
+        if input_too_small(orig_size, &self.args.minimum_size)? {
+            bail!("Skipping file as too small to encode");
+        }
+
         let mut child = command
             .stdout(std::process::Stdio::piped())
             // Don't send stderr to a pipe because it makes ffmpeg buffer the output.
             // .stderr(process::Stdio::piped())
             .spawn()?;
-
-        // Store the input file size in advance, because the user can delete the input file on Unix filesystems
-        // after the encode begins. But don't return now because this is notfatal:
-        let orig_size = get_file_size(&input.path);
 
         let mut child_stdout = child.stdout.take().unwrap();
         let mut child_stdout = Pin::new(&mut child_stdout);
@@ -572,13 +579,6 @@ impl Encoder {
                         Ok(size) => size,
                         Err(err) => {
                             failure_tx.send((input.path.to_owned(), format!("Could not get file size after encoding: {err:?}")))?;
-                            break;
-                        },
-                    };
-                    let orig_size = match orig_size {
-                        Ok(orig_size) => orig_size,
-                        Err(err) => {
-                            failure_tx.send((input.path.to_owned(), format!("Could not get original file disk space before encoding: {err:?}")))?;
                             break;
                         },
                     };
@@ -753,6 +753,33 @@ impl Encoder {
     }
 }
 
+fn size_str_to_int(input: &str) -> Result<u64> {
+    let msg = "Size string must be a number with optional K, M, G suffix";
+    let input = input.to_lowercase();
+    let captures = Regex::new(r"^(\.\d+|\d+(?:\.\d*)?)([bkmgt])?$")?
+        .captures(&input)
+        .context(msg)?;
+    let n = captures.get(1).context(msg)?.as_str().parse::<f64>().context(msg)?;
+    let suffix = captures.get(2).map_or("m", |m| m.as_str());
+    let factor = match suffix {
+        "b" => 1,
+        "k" => 1 << 10,
+        "m" => 1 << 20,
+        "g" => 1 << 30,
+        "t" => 1u64 << 40,
+        _ => bail!(msg),
+    };
+    Ok((factor as f64 * n) as u64)
+}
+
+fn input_too_small(size: u64, input_str: &Option<String>) -> Result<bool> {
+    if let Some(input_str) = input_str {
+        let input = size_str_to_int(input_str)?;
+        return Ok(size < input);
+    }
+    Ok(false)
+}
+
 async fn add_subtitles(input: &InputFile, vf_opts: &mut Vec<OsString>) -> Result<()> {
     let sub_file = tempfile::Builder::new()
         .suffix(".ass")
@@ -868,6 +895,26 @@ fn find_subtitle_file(input: &InputFile) -> Result<Option<PathBuf>> {
     }
 
     Ok(None)
+}
+
+#[test]
+fn test_size_str_to_int() {
+    assert_eq!(size_str_to_int("1024b").unwrap(), 1024);
+    assert_eq!(size_str_to_int("1k").unwrap(), 1024);
+    assert_eq!(size_str_to_int("1.5M").unwrap(), (1024.0 * 1024.0 * 1.5) as u64);
+    assert_eq!(size_str_to_int("1.5").unwrap(), (1024.0 * 1024.0 * 1.5) as u64);
+    assert_eq!(size_str_to_int(".5").unwrap(), (1024.0 * 1024.0 * 0.5) as u64);
+    assert_eq!(size_str_to_int("2g").unwrap(), (1024.0 * 1024.0 * 1024.0 * 2.0) as u64);
+    assert_eq!(size_str_to_int("0.002T").unwrap(), (1024.0 * 1024.0 * 1024.0 * 1024.0 * 0.002) as u64);
+}
+
+#[test]
+fn test_minimum_size_input() {
+    fn input_too_small_wrapper(size: u64, size_str: &str) -> bool {
+        return input_too_small(size, &Some(size_str.to_string())).unwrap();
+    }
+    assert!(input_too_small_wrapper((2.5 * 1024.0 * 1024.0) as u64 - 1, "2.5M"));
+    assert!(!input_too_small_wrapper((2.5 * 1024.0 * 1024.0) as u64, "2.5M"));
 }
 
 #[test]
