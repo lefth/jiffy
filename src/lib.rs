@@ -13,8 +13,6 @@ use globset::{Glob, GlobSetBuilder};
 use log::warn;
 use regex::Regex;
 
-pub const ENCODE_DIR: &str = "encoded";
-
 pub mod input_file;
 pub use input_file::*;
 pub mod logger;
@@ -76,8 +74,9 @@ pub struct Args {
     #[clap(long = "720p")]
     height_720p: bool,
 
-    /// Encode as 8-bit. Otherwise the video will be 10-bit, except if creating
-    /// a file as reference or for TV.
+    /// Encode as 8-bit.  Otherwise the video will be 10-bit, except if creating
+    /// a file as reference or for TV. However, this depends on the compilation
+    /// options of the encoder.
     #[clap(
         long = "8-bit",
         alias = "8bit",
@@ -197,6 +196,10 @@ pub struct Args {
     /// For example: --output-name "{basename}-crf{crf}"
     #[clap(long, aliases = ["output-format", "name-format", "naming-format"])]
     pub output_name: Option<String>,
+
+    /// Output files will be saved in this directory.
+    #[clap(long, short, aliases = ["output-directory", "output-path"], default_value("encoded"))]
+    pub output_dir: PathBuf,
 }
 
 impl Args {
@@ -697,7 +700,7 @@ impl Encoder {
         )?;
         let mut videos = Vec::new();
         let mut dirs = VecDeque::from([self.video_root.to_owned()]);
-        let encode_dir = self.video_root.join(ENCODE_DIR);
+        let encode_dir = self.video_root.join(&self.args.output_dir);
         while let Some(dir) = dirs.pop_front() {
             let mut entries = Vec::new();
             for entry in dir.read_dir()? {

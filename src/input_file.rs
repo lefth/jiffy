@@ -12,7 +12,7 @@ use tokio::process::Command;
 
 #[allow(unused_imports)]
 use crate::{_debug, _error, _info, _log, _trace, _warn};
-use crate::{find_executable, Args, Codec, Executable, ENCODE_DIR};
+use crate::{find_executable, Args, Codec, Executable};
 
 pub struct InputFile {
     pub path: PathBuf,
@@ -62,7 +62,7 @@ impl InputFile {
         let output_dir = self
             .args
             .video_root
-            .join(ENCODE_DIR);
+            .join(&self.args.output_dir);
 
         let extension = self.path
             .extension()
@@ -97,7 +97,7 @@ impl InputFile {
         } else {
             let mut output = args
                 .video_root
-                .join(ENCODE_DIR)
+                .join(&args.output_dir)
                 .join(Self::trim_input_path(&input_path, &args.video_root)?)
                 .into_os_string();
             output.push(".log");
