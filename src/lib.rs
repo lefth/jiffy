@@ -7,7 +7,7 @@ use std::{
 
 use lexical_sort;
 use anyhow::{anyhow, bail, Context, Result};
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use futures::stream::{FuturesUnordered, StreamExt};
 use globset::{Glob, GlobSetBuilder};
 use log::warn;
@@ -111,6 +111,10 @@ pub struct Args {
     /// directory with a log file per input.
     #[clap(long, short)]
     pub no_log: bool,
+
+    /// Can specify -q -q (-qq) to make the program ever more quiet.
+    #[clap(long, short, action = ArgAction::Count)]
+    pub quiet: u8,
 
     /// Don't check if the audio streams are within acceptable limits--just reencode them (unless
     /// `--copy-audio` was specified). This saves a little time in some circumstances.
@@ -396,9 +400,26 @@ impl Encoder {
         }
 
         // Normal args for ffmpeg:
-        let mut child_args = os_args!["-i", &input.path];
+        let mut child_args = os_args!["-i", &input.path, "-hide_banner"];
         // Options for -vf:
         let mut vf = Vec::<OsString>::new();
+
+        match self.args.quiet {
+            0 => {}
+            1 => {
+                child_args.extend(os_args!(str: "-loglevel warning"));
+            }
+            2 => {
+                child_args.extend(os_args!(str: "-loglevel error"));
+                child_args.extend(os_args!(str: "-x265-params loglevel=warning"));
+                // child_args.extend(os_args!(str: "-aom-params quiet")); // not supported
+            }
+            3.. => {
+                child_args.extend(os_args!(str: "-loglevel error"));
+                child_args.extend(os_args!(str: "-x265-params loglevel=error"));
+                // child_args.extend(os_args!(str: "-aom-params quiet")); // not supported
+            }
+        }
 
         child_args.extend(os_args!(
             str: "-nostdin -map_metadata 0 -movflags +faststart -movflags +use_metadata_tags -strict experimental"));
@@ -879,7 +900,6 @@ fn find_executable(executable: Executable) -> Result<OsString> {
     Ok(executable_name.into())
 }
 
-#[allow(dead_code)]
 /// Use ffmpeg to convert one path to another path, optionally with the `-c copy` option.
 async fn dump_stream(input_path: &Path, output_path: &Path, copy: bool) -> Result<()> {
     let mut cmd = Command::new(find_executable(Executable::FFMPEG)?);

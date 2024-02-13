@@ -8,13 +8,25 @@ use jiffy::{Args, Encoder};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if env::var_os("RUST_LOG").is_some() {
-        env_logger::init();
-    } else {
-        env_logger::builder().filter_level(LevelFilter::Info).init();
-    }
 
     let args = Args::parse();
+
+    match args.quiet {
+        0 => {
+            if env::var_os("RUST_LOG").is_some() {
+                env_logger::init();
+            } else {
+                env_logger::builder().filter_level(LevelFilter::Info).init();
+            }
+        }
+        1 => {
+            env_logger::builder().filter_level(LevelFilter::Warn).init();
+        }
+        2.. => {
+            env_logger::builder().filter_level(LevelFilter::Error).init();
+        }
+    }
+
     if !args.video_root.exists() {
         bail!("Video root does not exist: {:?}", args.video_root);
     }
