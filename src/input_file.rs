@@ -12,7 +12,7 @@ use tokio::process::Command;
 
 #[allow(unused_imports)]
 use crate::{_debug, _error, _info, _log, _trace, _warn};
-use crate::{find_executable, Args, Codec, Executable};
+use crate::{find_executable, get_output_dir, normalize_path, Args, Codec, Executable};
 
 pub struct InputFile {
     pub path: PathBuf,
@@ -22,7 +22,7 @@ pub struct InputFile {
 }
 
 impl InputFile {
-    pub(crate) async fn new(path: &Path, args: Arc<Args>) -> Result<Self> {
+    pub async fn new(path: &Path, args: Arc<Args>) -> Result<Self> {
         let mut ret = Self {
             path: path.to_owned(),
             log_path: Self::get_log_path(path, &args)?,
@@ -40,7 +40,15 @@ impl InputFile {
     /// And the video path is:   a/b/videos/2009/june/x.mp4
     /// The result path will be:            2009/june/x.mp4
     fn trim_input_path(input_path: &Path, video_root: &Path) -> Result<PathBuf> {
-        if !input_path.starts_with(video_root) {
+        let input_path = normalize_path(input_path);
+        let video_root = normalize_path(video_root);
+
+        if video_root == PathBuf::from(".") {
+            assert!(input_path.is_relative(), "Video rooted in path '.' must be relative.");
+            return Ok(input_path.to_owned());
+        }
+
+        if !input_path.starts_with(&video_root) {
             bail!("Videos should be in the video root.");
         }
         Ok(input_path
@@ -49,7 +57,7 @@ impl InputFile {
             .collect::<PathBuf>())
         }
 
-    pub(crate) fn fill_output_template(naming_format: &str, directory: PathBuf, basename: &str, preset: &str, crf: &str, extension: &str) -> PathBuf {
+    pub fn fill_output_template(naming_format: &str, directory: PathBuf, basename: &str, preset: &str, crf: &str, extension: &str) -> PathBuf {
         let name = naming_format.replace("{basename}", basename);
         let name = name.replace("{preset}", preset);
         let name = name.replace("{crf}", crf);
@@ -58,11 +66,8 @@ impl InputFile {
         directory.join(PathBuf::from(name))
     }
 
-    pub(crate) fn get_output_path(&self, naming_format: Option<String>) -> Result<PathBuf> {
-        let output_dir = self
-            .args
-            .video_root
-            .join(&self.args.output_dir);
+    pub fn get_output_path(&self, naming_format: Option<String>) -> Result<PathBuf> {
+        let output_dir = get_output_dir(&self.args);
 
         let extension = self.path
             .extension()
@@ -95,28 +100,11 @@ impl InputFile {
         if args.no_log {
             Ok(None)
         } else {
-            let mut output = args
-                .video_root
-                .join(&args.output_dir)
+            let output_dir = get_output_dir(args);
+            let mut output = output_dir
                 .join(Self::trim_input_path(&input_path, &args.video_root)?)
                 .into_os_string();
             output.push(".log");
-
-            let mut parent = PathBuf::from(&output);
-            if !parent.pop() {
-                bail!("Generated path must have a parent directory");
-            }
-
-            if !parent.is_dir() {
-                if parent.exists() {
-                    bail!(
-                        "Cannot make log file {:?} because the parent exists but is not a directory.",
-                        &output
-                    );
-                }
-                // No need for a mutex, this is thread-safe:
-                std::fs::create_dir_all(parent)?;
-            }
 
             Ok(Some(output.into()))
         }
@@ -355,5 +343,13 @@ impl InputFile {
                     .context("Additional ffmpeg argument was not proper UTF-8")
             })
             .transpose()?)
+    }
+
+    pub(crate) fn create_log_directory(&self) -> Result<()> {
+        if let Some(log_path) = self.log_path.as_ref() {
+            let parent = log_path.parent().context(format!("Log path does not have a parent: {log_path:?}"))?;
+            std::fs::create_dir_all(parent)?;
+        }
+        Ok(())
     }
 }

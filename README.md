@@ -101,18 +101,15 @@ After Rust is installed, run:
 
 ## Quirks
 
-The output filename is currently hard coded to: `input-filename-crf<CRF>.mp4`
-(or `.mkv`), or `input-filename-<PROFILE>-crf<CRF>.mp4` for AV1 videos. This
-helps distinguish between encodes and originals, but it's not beautiful.
-
-It would be ideal to configure the output filename based on a template in a
-config file or environment variable formatted like the following:
-`{INPUT_FILENAME_STEM}-{PROFILE}.{EXTENSION}`. Patches are welcome.
-
 Symlinks within the encode directory are not handled intelligently. The same
 video can end up being encoded multiple times. Ideally symlinks should be
 dereferenced if they point outside the video directory, and transformed
-if they point within the video directory.
+if they point within the video directory. Patches are welcome.
+
+## Attribution
+
+This project uses code from the Cargo project, which can be obtained from [its repository]
+(https://github.com/rust-lang/cargo).
 
 ## See also
 

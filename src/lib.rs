@@ -20,8 +20,10 @@ pub mod logger;
 pub use logger::*;
 use tokio::{io::AsyncReadExt, process::Command, select, time::sleep};
 
+pub const ENCODED: &str = "encoded";
+
 #[derive(PartialEq, std::fmt::Debug)]
-enum Codec {
+pub enum Codec {
     Av1,
     H265,
     H264,
@@ -34,19 +36,19 @@ pub struct Args {
     /// if unspecified, a better CRF may be used for small videos, or a lower quality CRF may be
     /// used for animation.
     #[clap(long)]
-    crf: Option<u8>,
+    pub crf: Option<u8>,
 
     /// Use x265 instead of aom-av1. This is true by default with --animation.
     #[clap(long, alias = "h265", conflicts_with_all = ["av1", "reference"])]
-    x265: bool,
+    pub x265: bool,
 
     /// Use x264 to make a high quality (high disk space) fast encode.
     #[clap(long, conflicts_with_all = ["av1", "x265"])]
-    reference: bool,
+    pub reference: bool,
 
     /// Use libaom-av1 for encoding. This is the default, except for animation.
     #[clap(long = "av1", aliases = ["aom", "libaom", "aom-av1"])]
-    av1: bool,
+    pub av1: bool,
 
     /// Use settings that work well for anime or animation.
     #[clap(long = "animation", alias = "anime",
@@ -55,24 +57,24 @@ pub struct Args {
             ("anime_mixed_dark_battle", "true", "true"),
         ],
     )]
-    anime: bool,
+    pub anime: bool,
 
     /// Use this setting for slow well lit anime, like slice of life:
     #[clap(long, conflicts_with_all = ["av1", "anime_mixed_dark_battle", "reference"])]
-    anime_slow_well_lit: bool,
+    pub anime_slow_well_lit: bool,
 
     /// Use this setting for anime with some dark scenes, some battle scenes (shonen, historical, etc.)
     #[clap(long, conflicts_with_all = ["av1", "anime_slow_well_lit", "reference"])]
-    anime_mixed_dark_battle: bool,
+    pub anime_mixed_dark_battle: bool,
 
     /// Encode this many videos in parallel. The default varies per encoder.
     #[clap(long, short, alias = "max-jobs")]
-    jobs: Option<usize>,
+    pub jobs: Option<usize>,
 
     /// Encode as 720p. Otherwise the video will be 1080p. The source size is taken into
     /// consideration; in no case is a video scaled up.
     #[clap(long = "720p")]
-    height_720p: bool,
+    pub height_720p: bool,
 
     /// Encode as 8-bit.  Otherwise the video will be 10-bit, except if creating
     /// a file as reference or for TV. However, this depends on the compilation
@@ -201,13 +203,14 @@ pub struct Args {
     #[clap(long, aliases = ["output-format", "name-format", "naming-format"])]
     pub output_name: Option<String>,
 
-    /// Output files will be saved in this directory.
-    #[clap(long, short, aliases = ["output-directory", "output-path"], default_value("encoded"))]
-    pub output_dir: PathBuf,
+    /// Output files will be saved in this directory. By default, it is
+    /// <VIDEO_ROOT>/encoded.
+    #[clap(long, short, aliases = ["output-directory", "output-dir", "output-path"])]
+    pub output_dir: Option<PathBuf>,
 }
 
 impl Args {
-    pub(crate) fn get_video_codec(&self) -> Codec {
+    pub fn get_video_codec(&self) -> Codec {
         if self.copy_streams {
             Codec::Copy
         } else if self.reference || self.for_tv {
@@ -250,7 +253,7 @@ impl Args {
             .collect())
     }
 
-    pub(crate) fn get_extra_normal_flags(&self) -> Result<Vec<String>> {
+    pub fn get_extra_normal_flags(&self) -> Result<Vec<String>> {
         let raw = self.get_extra_flags()?;
         // Combine these to detect -vf and the arg together:
         // [-vf     hflip           ]
@@ -269,7 +272,7 @@ impl Args {
             .collect())
     }
 
-    pub(crate) fn get_extra_vf_flags(&self) -> Result<Vec<String>> {
+    pub fn get_extra_vf_flags(&self) -> Result<Vec<String>> {
         let raw = self.get_extra_flags()?;
         // Combine these to detect -vf and the arg together:
         // [-vf     hflip           ]
@@ -556,6 +559,7 @@ impl Encoder {
         let mut program = Command::new(&self.ffmpeg_path);
         let mut command = program.args(child_args);
         if let Some(ref log_path) = input.log_path {
+            input.create_log_directory()?;
             let mut ffreport = OsString::from("file=");
             // ':' and '\' must be escaped:
             let lossy_logpath = log_path.to_string_lossy();
@@ -721,7 +725,7 @@ impl Encoder {
         )?;
         let mut videos = Vec::new();
         let mut dirs = VecDeque::from([self.video_root.to_owned()]);
-        let encode_dir = self.video_root.join(&self.args.output_dir);
+        let encode_dir = get_output_dir(&self.args);
         while let Some(dir) = dirs.pop_front() {
             let mut entries = Vec::new();
             for entry in dir.read_dir()? {
@@ -743,7 +747,7 @@ impl Encoder {
 
                 if let Some(include) = &include {
                     if !include.is_match(&matchable_path) {
-                        if self.include_as_paths.iter().any(|incl| filename_is_match(incl, &matchable_path)) {
+                        if self.include_as_paths.iter().any(|incl| is_same_file(incl, &matchable_path)) {
                             log::warn!("Path did not match an include pattern, but did match exactly. Including: {fname:?}");
                         } else {
                             log::debug!("Skipping path because it's not an included path: {fname:?}");
@@ -752,12 +756,12 @@ impl Encoder {
                     }
                 }
 
-                if fname == encode_dir {
+                if is_same_file(&fname, &encode_dir) {
                     continue;
                 } else if exclude.is_match(&matchable_path) {
                     log::debug!("Skipping path because of exclude: {fname:?}");
                     continue;
-                } else if self.exclude_as_paths.iter().any(|incl| filename_is_match(incl, &matchable_path)) {
+                } else if self.exclude_as_paths.iter().any(|incl| is_same_file(incl, &matchable_path)) {
                     log::warn!("Path did not match an exclude as a pattern, but did match exactly. Excluding: {fname:?}");
                     continue;
                 }
@@ -803,7 +807,7 @@ impl Encoder {
     }
 }
 
-fn size_str_to_int(input: &str) -> Result<u64> {
+pub fn parse_size(input: &str) -> Result<u64> {
     let msg = "Size string must be a number with optional K, M, G suffix";
     let input = input.to_lowercase();
     let captures = Regex::new(r"^(\.\d+|\d+(?:\.\d*)?)([bkmgt])?$")?
@@ -822,9 +826,9 @@ fn size_str_to_int(input: &str) -> Result<u64> {
     Ok((factor as f64 * n) as u64)
 }
 
-fn input_too_small(size: u64, input_str: &Option<String>) -> Result<bool> {
+pub fn input_too_small(size: u64, input_str: &Option<String>) -> Result<bool> {
     if let Some(input_str) = input_str {
-        let input = size_str_to_int(input_str)?;
+        let input = parse_size(input_str)?;
         return Ok(size < input);
     }
     Ok(false)
@@ -845,7 +849,7 @@ async fn add_subtitles(input: &InputFile, vf_opts: &mut Vec<OsString>) -> Result
     Ok(())
 }
 
-fn get_file_size(output_fname: &PathBuf) -> Result<u64> {
+fn get_file_size(output_fname: &Path) -> Result<u64> {
     let md = output_fname.metadata()?;
     #[cfg(unix)] {
         use std::os::unix::fs::MetadataExt;
@@ -857,7 +861,40 @@ fn get_file_size(output_fname: &PathBuf) -> Result<u64> {
     }
 }
 
-fn extension_matches(fname: &PathBuf, video_re: &Regex) -> Result<bool> {
+// From Cargo: https://github.com/rust-lang/cargo/blob/7b7af3077bff8d60b7f124189bc9de227d3063a9/crates/cargo-util/src/paths.rs#L84
+/// Normalize a path, removing things like `.` and `..`.
+///
+/// CAUTION: This does not resolve symlinks
+pub fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut components = path.components().peekable();
+    let mut ret = if let Some(c @ Component::Prefix(..)) = components.peek().cloned() {
+        components.next();
+        PathBuf::from(c.as_os_str())
+    } else {
+        PathBuf::new()
+    };
+
+    for component in components {
+        match component {
+            Component::Prefix(..) => unreachable!(),
+            Component::RootDir => {
+                ret.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                ret.pop();
+            }
+            Component::Normal(c) => {
+                ret.push(c);
+            }
+        }
+    }
+    ret
+}
+
+fn extension_matches(fname: &Path, video_re: &Regex) -> Result<bool> {
     if let Some(extension) = fname.extension() {
         let extension = extension.to_ascii_lowercase().to_str()
             .map(|s| s.to_string())
@@ -867,7 +904,7 @@ fn extension_matches(fname: &PathBuf, video_re: &Regex) -> Result<bool> {
     return Ok(false);
 }
 
-fn filename_is_match(pattern: &PathBuf, matchable_path: &PathBuf) -> bool {
+fn is_same_file(pattern: &Path, matchable_path: &Path) -> bool {
     if let Ok(canonical_pattern) = pattern.canonicalize() {
         if let Ok(canonical_path) = matchable_path.canonicalize() {
             if canonical_path == canonical_pattern {
@@ -946,236 +983,6 @@ fn find_subtitle_file(input: &InputFile) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-#[test]
-fn test_size_str_to_int() {
-    assert_eq!(size_str_to_int("1024b").unwrap(), 1024);
-    assert_eq!(size_str_to_int("1k").unwrap(), 1024);
-    assert_eq!(size_str_to_int("1.5M").unwrap(), (1024.0 * 1024.0 * 1.5) as u64);
-    assert_eq!(size_str_to_int("1.5").unwrap(), (1024.0 * 1024.0 * 1.5) as u64);
-    assert_eq!(size_str_to_int(".5").unwrap(), (1024.0 * 1024.0 * 0.5) as u64);
-    assert_eq!(size_str_to_int("2g").unwrap(), (1024.0 * 1024.0 * 1024.0 * 2.0) as u64);
-    assert_eq!(size_str_to_int("0.002T").unwrap(), (1024.0 * 1024.0 * 1024.0 * 1024.0 * 0.002) as u64);
-}
-
-#[test]
-fn test_minimum_size_input() {
-    fn input_too_small_wrapper(size: u64, size_str: &str) -> bool {
-        return input_too_small(size, &Some(size_str.to_string())).unwrap();
-    }
-    assert!(input_too_small_wrapper((2.5 * 1024.0 * 1024.0) as u64 - 1, "2.5M"));
-    assert!(!input_too_small_wrapper((2.5 * 1024.0 * 1024.0) as u64, "2.5M"));
-}
-
-#[test]
-fn test_opt_codec() {
-    let args = &Args::parse_from(["prog_name", "--av1"]);
-    assert_eq!(args.get_video_codec(), Codec::Av1);
-
-    let args = &Args::parse_from(["prog_name"]);
-    assert_eq!(args.get_video_codec(), Codec::Av1);
-
-    let args = &Args::parse_from(["prog_name", "--x265"]);
-    assert_eq!(args.get_video_codec(), Codec::H265);
-
-    let args = &Args::parse_from(["prog_name", "--h265"]);
-    assert_eq!(args.get_video_codec(), Codec::H265);
-
-    let args = &Args::parse_from(["prog_name", "--anime"]);
-    assert_eq!(args.get_video_codec(), Codec::H265);
-
-    let args = &Args::parse_from(["prog_name", "--for-tv"]);
-    assert_eq!(args.get_video_codec(), Codec::H264);
-
-    let args = &Args::parse_from(["prog_name", "--reference"]);
-    assert_eq!(args.get_video_codec(), Codec::H264);
-
-    let args = &Args::parse_from(["prog_name", "--anime", "--aom-av1"]);
-    assert_eq!(args.get_video_codec(), Codec::Av1);
-
-    let args = &Args::parse_from(["prog_name", "--anime", "--aom-av1"]);
-    assert_eq!(args.get_video_codec(), Codec::Av1);
-
-    let args = &Args::parse_from(["prog_name", "--anime-mixed-dark-battle"]);
-    assert_eq!(args.get_video_codec(), Codec::H265);
-
-    let args = &Args::parse_from(["prog_name", "--anime-slow-well-lit"]);
-    assert_eq!(args.get_video_codec(), Codec::H265);
-}
-
-#[test]
-fn test_incompatible_opts() {
-    assert!(matches!(
-        Args::try_parse_from(["prog_name", "--anime-slow-well-lit", "--av1"]),
-        Err(_)
-    ));
-
-    assert!(matches!(
-        Args::try_parse_from(["prog_name", "--anime-mixed-dark-battle", "--av1"]),
-        Err(_)
-    ));
-}
-
-#[test]
-fn test_crf() {
-    let args = Args::parse_from("prog_name --include '**/*Online*Course*' $USERPROFILE/dwhelper/ --overwrite --no-audio --x265 --no-log --crf 26".split_whitespace());
-    assert_eq!(args.crf, Some(26));
-}
-
-#[test]
-fn test_fill_output_template() {
-    assert_eq!(InputFile::fill_output_template("{basename}-{preset}-{crf}", PathBuf::from("dir"), "foo", "preset", "crf", "avi"),
-        PathBuf::from("dir/foo-preset-crf.avi"));
-    assert_eq!(InputFile::fill_output_template("{basename}", PathBuf::from("dir"), "foo", "preset", "crf", "avi"),
-        PathBuf::from("dir/foo.avi"));
-}
-
-#[test]
-fn test_output_fname() {
-    use tokio::runtime::Runtime;
-
-    let args = Arc::new(Args::parse_from(["prog_name", "--av1", "a/b"]));
-
-    let rt = Runtime::new().unwrap();
-    let input = rt
-        .block_on(InputFile::new(Path::new("a/b/vid.en.MP4"), args))
-        .unwrap();
-    assert_eq!(
-        input.get_output_path(None).unwrap(),
-        PathBuf::from("a/b/encoded/vid.en-5-crf24.mp4")
-    );
-    assert_eq!(
-        input.get_output_path(Some(String::from("{basename}-{preset}-crf{crf}"))).unwrap(),
-        PathBuf::from("a/b/encoded/vid.en-5-crf24.mp4")
-    );
-    assert_eq!(
-        input.get_output_path(Some(String::from("{basename}-crf{crf}"))).unwrap(),
-        PathBuf::from("a/b/encoded/vid.en-crf24.mp4")
-    );
-    assert_eq!(
-        input.log_path,
-        Some(PathBuf::from("a/b/encoded/vid.en.MP4.log"))
-    );
-
-    let args = Arc::new(Args::parse_from(["prog_name", "--x265", "--no-log", "a/b"]));
-    let input = rt
-        .block_on(InputFile::new(
-            Path::new("a/b/subdir/vid.mp4"),
-            args.clone(),
-        ))
-        .unwrap();
-    assert_eq!(
-        input.get_output_path(None).unwrap(),
-        PathBuf::from("a/b/encoded/subdir/vid-crf22.mp4")
-    );
-    assert_eq!(input.log_path, None);
-
-    let input = rt
-        .block_on(InputFile::new(Path::new("a/b/vid.MKV"), args.clone()))
-        .unwrap();
-    assert_eq!(
-        input.get_output_path(None).unwrap(),
-        PathBuf::from("a/b/encoded/vid-crf22.mkv")
-    );
-
-    let input = rt
-        .block_on(InputFile::new(
-            Path::new("outside-root/vid.mkv"),
-            args.clone(),
-        ))
-        .unwrap();
-    assert!(matches!(input.get_output_path(None), Err(_)));
-
-    let args = Arc::new(Args::parse_from(["prog_name", "--x265", "--no-log", "/a"]));
-    let input = rt
-        .block_on(InputFile::new(Path::new("/a/vid.flv"), args.clone()))
-        .unwrap();
-    assert_eq!(
-        input.get_output_path(None).unwrap(),
-        PathBuf::from("/a/encoded/vid-crf22.mkv")
-    );
-
-    let args = Arc::new(Args::parse_from([
-        "prog_name",
-        "--copy-streams",
-        "--no-log",
-        "/a",
-    ]));
-    let input = rt
-        .block_on(InputFile::new(Path::new("/a/vid.flv"), args.clone()))
-        .unwrap();
-    assert_eq!(
-        input.get_output_path(None).unwrap(),
-        PathBuf::from("/a/encoded/vid-crf0.mkv")
-    );
-
-    let args = Arc::new(Args::parse_from([
-        "prog_name",
-        "--reference",
-        "--no-log",
-        "/a",
-    ]));
-    let input = rt
-        .block_on(InputFile::new(Path::new("/a/vid.flv"), args.clone()))
-        .unwrap();
-    assert_eq!(
-        input.get_output_path(None).unwrap(),
-        PathBuf::from("/a/encoded/vid-crf8.mkv")
-    );
-}
-
-#[test]
-fn test_preset() -> Result<()> {
-    let args = &Args::parse_from(["prog_name"]);
-    assert_eq!(args.x265, false);
-    assert_eq!(args.eight_bit, false);
-    assert_eq!(args.preset, "5");
-    let args = &Args::parse_from(["prog_name", "--preset=3"]);
-    assert_eq!(args.preset, "3");
-    let args = &Args::parse_from(["prog_name", "--for-tv"]);
-    assert_eq!(args.preset, "fast");
-    assert_eq!(args.eight_bit, true);
-    let args = &Args::parse_from(["prog_name", "--x265"]);
-    assert_eq!(args.preset, "slow");
-
-    Ok(())
-}
-
-#[test]
-fn test_extra_flags() -> Result<()> {
-    let args = &Args::parse_from([
-        "prog_name",
-        "--extra-flag",
-        "-vf hflip",
-        "--extra-flag",
-        "-ss 30",
-        "--extra-flag=-vf bwdif",
-        "--extra-flag=-t 5:00",
-    ]);
-
-    let correct_extra_flags = ["-ss", "30", "-t", "5:00"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
-    let correct_extra_vf_flags = ["hflip", "bwdif"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
-
-    assert_eq!(args.get_extra_normal_flags()?, correct_extra_flags);
-    assert_eq!(args.get_extra_vf_flags()?, correct_extra_vf_flags);
-
-    let args = &Args::parse_from([
-        "prog_name",
-        "--extra-flag",
-        "-ss 30",
-        "--extra-flag",
-        "-vf hflip",
-        "--extra-flag=-t 5:00",
-        "--extra-flag=-vf bwdif",
-    ]);
-
-    assert_eq!(args.get_extra_normal_flags()?, correct_extra_flags);
-    assert_eq!(args.get_extra_vf_flags()?, correct_extra_vf_flags);
-
-    Ok(())
+pub fn get_output_dir(args: &Args) -> PathBuf {
+    args.output_dir.as_ref().map_or(args.video_root.join(ENCODED), |path| path.to_owned())
 }

@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use log::{warn, LevelFilter};
 
-use jiffy::{Args, Encoder};
+use jiffy::{get_output_dir, Args, Encoder};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     if let Ok(video_root) = args.video_root.canonicalize()
     {
         if video_root.components().last().expect("Cannot get components of encode path").as_os_str()
-            == args.output_dir
+            == get_output_dir(&args)
         {
             warn!("The video directory is named {:?}. Did you mean to encode the parent directory?", args.output_dir);
             thread::sleep(Duration::from_millis(2000));

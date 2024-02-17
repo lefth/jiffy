@@ -12,6 +12,7 @@ pub trait LogDest {
 impl LogDest for &InputFile {
     fn my_write_fmt(self, fmt: Arguments) -> Result<()> {
         if let Some(ref log_path) = self.log_path {
+            self.create_log_directory()?;
             let mut file = OpenOptions::new()
                 .append(true)
                 .create(true)
