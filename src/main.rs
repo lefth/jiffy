@@ -2,7 +2,8 @@ use std::{env, thread, time::Duration};
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use log::{warn, LevelFilter};
+#[allow(unused_imports)]
+use log::*;
 
 use jiffy::{get_output_dir, Args, Encoder};
 
@@ -10,7 +11,17 @@ use jiffy::{get_output_dir, Args, Encoder};
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    match args.quiet {
+    match args.quiet as i8 - args.verbose as i8 {
+        ..-1 => {
+            env_logger::builder()
+                .filter_level(LevelFilter::Trace)
+                .init();
+        }
+        -1 => {
+            env_logger::builder()
+                .filter_level(LevelFilter::Debug)
+                .init();
+        }
         0 => {
             if env::var_os("RUST_LOG").is_some() {
                 env_logger::init();

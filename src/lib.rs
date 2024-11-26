@@ -128,6 +128,10 @@ pub struct Args {
     #[clap(long, short, action = ArgAction::Count)]
     pub quiet: u8,
 
+    /// Increase the log verbosity.
+    #[clap(long, short, action = ArgAction::Count)]
+    pub verbose: u8,
+
     /// Don't check if the audio streams are within acceptable limits--just reencode them (unless
     /// `--copy-audio` was specified). This saves a little time in some circumstances.
     #[clap(
@@ -425,8 +429,11 @@ impl Encoder {
         // Options for -vf:
         let mut vf = Vec::<OsString>::new();
 
-        match self.args.quiet {
-            0 => {}
+        match self.args.quiet as i8 - self.args.verbose as i8 {
+            ..0 => {}
+            0 => {
+                child_args.extend(os_args!(str: "-loglevel info"));
+            }
             1 => {
                 child_args.extend(os_args!(str: "-loglevel warning"));
             }
