@@ -1,16 +1,26 @@
 use std::{
-    cmp::max, collections::VecDeque, env, ffi::OsString, fs::remove_file, io::Write, path::{Path, PathBuf}, pin::Pin, sync::{
+    cmp::max,
+    collections::VecDeque,
+    env,
+    ffi::OsString,
+    fs::remove_file,
+    io::Write,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::{
         mpsc::{channel, Sender},
         Arc,
-    }, time::Duration
+    },
+    time::Duration,
 };
 
-use lexical_sort;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{ArgAction, Parser};
 use futures::stream::{FuturesUnordered, StreamExt};
 use globset::{Glob, GlobSetBuilder};
-use log::warn;
+use lexical_sort;
+#[allow(unused_imports)]
+use log::*;
 use regex::Regex;
 
 pub mod input_file;
@@ -380,7 +390,11 @@ impl Encoder {
         Ok(())
     }
 
-    async fn encode_video(&self, input: &InputFile, failure_tx: Sender<(PathBuf, String)>) -> Result<(), EncodingErr> {
+    async fn encode_video(
+        &self,
+        input: &InputFile,
+        failure_tx: Sender<(PathBuf, String)>,
+    ) -> Result<(), EncodingErr> {
         let input_path = input.path.clone();
         if let Err(err) = self.encode_video_inner(input, failure_tx).await {
             return Err(EncodingErr(input_path, format!("{err:?}")));
@@ -389,7 +403,11 @@ impl Encoder {
     }
 
     /// Multiple failure messages may be sent along the tx.
-    async fn encode_video_inner(&self, input: &InputFile, failure_tx: Sender<(PathBuf, String)>) -> Result<()> {
+    async fn encode_video_inner(
+        &self,
+        input: &InputFile,
+        failure_tx: Sender<(PathBuf, String)>,
+    ) -> Result<()> {
         let output_path = input.get_output_path(self.args.output_name.clone())?;
         let parent = output_path
             .parent()
@@ -437,9 +455,11 @@ impl Encoder {
 
         if self.args.for_tv {
             if input.contains_subtitle().await? {
-                if let Err(err) = add_subtitles(input, &mut vf).await
-                {
-                    failure_tx.send((input.path.to_owned(), format!("Error adding subtitles: {err:?}")))?;
+                if let Err(err) = add_subtitles(input, &mut vf).await {
+                    failure_tx.send((
+                        input.path.to_owned(),
+                        format!("Error adding subtitles: {err:?}"),
+                    ))?;
                 }
 
                 // And don't include the existing soft subs:
@@ -473,7 +493,10 @@ impl Encoder {
         if self.args.overwrite {
             child_args.extend(os_args!["-y"]);
         } else if output_path.exists() {
-            failure_tx.send((output_path.to_owned(), format!("Output path already exists: {output_path:?}")))?;
+            failure_tx.send((
+                output_path.to_owned(),
+                format!("Output path already exists: {output_path:?}"),
+            ))?;
             return Ok(());
         }
 
@@ -546,7 +569,10 @@ impl Encoder {
             }
             Err(env::VarError::NotPresent) => {}
             Err(err) => {
-                _warn!(input, "Could not get extra ffmpeg args from FFMPEG_FLAGS: {err}");
+                _warn!(
+                    input,
+                    "Could not get extra ffmpeg args from FFMPEG_FLAGS: {err}"
+                );
             }
         }
 
@@ -573,8 +599,9 @@ impl Encoder {
             }
             command = command.env("FFREPORT", ffreport);
         }
-        let orig_size = get_file_size(&input.path)
-            .context(format!("Could not get original file disk space before encoding"))?;
+        let orig_size = get_file_size(&input.path).context(format!(
+            "Could not get original file disk space before encoding"
+        ))?;
         if input_too_small(orig_size, &self.args.minimum_size)? {
             bail!("Skipping file as too small to encode");
         }
@@ -732,7 +759,10 @@ impl Encoder {
                 entries.push(entry?);
             }
             entries.sort_by(|s1, s2| {
-                lexical_sort::natural_lexical_cmp(&s1.path().to_string_lossy(), &s2.path().to_string_lossy())
+                lexical_sort::natural_lexical_cmp(
+                    &s1.path().to_string_lossy(),
+                    &s2.path().to_string_lossy(),
+                )
             });
             for entry in entries {
                 if let Some(limit) = self.args.limit {
@@ -747,10 +777,16 @@ impl Encoder {
 
                 if let Some(include) = &include {
                     if !include.is_match(&matchable_path) {
-                        if self.include_as_paths.iter().any(|incl| is_same_file(incl, &matchable_path)) {
+                        if self
+                            .include_as_paths
+                            .iter()
+                            .any(|incl| is_same_file(incl, &matchable_path))
+                        {
                             log::warn!("Path did not match an include pattern, but did match exactly. Including: {fname:?}");
                         } else {
-                            log::debug!("Skipping path because it's not an included path: {fname:?}");
+                            log::debug!(
+                                "Skipping path because it's not an included path: {fname:?}"
+                            );
                             continue;
                         }
                     }
@@ -761,7 +797,11 @@ impl Encoder {
                 } else if exclude.is_match(&matchable_path) {
                     log::debug!("Skipping path because of exclude: {fname:?}");
                     continue;
-                } else if self.exclude_as_paths.iter().any(|incl| is_same_file(incl, &matchable_path)) {
+                } else if self
+                    .exclude_as_paths
+                    .iter()
+                    .any(|incl| is_same_file(incl, &matchable_path))
+                {
                     log::warn!("Path did not match an exclude as a pattern, but did match exactly. Excluding: {fname:?}");
                     continue;
                 }
@@ -778,10 +818,21 @@ impl Encoder {
         Ok(videos)
     }
 
-    fn check_encoded_size(&self, orig_size: u64, input_path: PathBuf, output_path: PathBuf, failure_tx: Sender<(PathBuf, String)>) -> Result<()> {
+    fn check_encoded_size(
+        &self,
+        orig_size: u64,
+        input_path: PathBuf,
+        output_path: PathBuf,
+        failure_tx: Sender<(PathBuf, String)>,
+    ) -> Result<()> {
         let size = get_file_size(&output_path).context("Could not get file size after encoding")?;
         if size < 300 {
-            failure_tx.send((input_path, format!("Deleting {size} byte output file: {output_path:?}"))).unwrap();
+            failure_tx
+                .send((
+                    input_path,
+                    format!("Deleting {size} byte output file: {output_path:?}"),
+                ))
+                .unwrap();
             remove_file(output_path)?;
             return Ok(());
         }
@@ -803,7 +854,7 @@ impl Encoder {
             }
         }
 
-        return Ok(())
+        return Ok(());
     }
 }
 
@@ -813,7 +864,12 @@ pub fn parse_size(input: &str) -> Result<u64> {
     let captures = Regex::new(r"^(\.\d+|\d+(?:\.\d*)?)([bkmgt])?$")?
         .captures(&input)
         .context(msg)?;
-    let n = captures.get(1).context(msg)?.as_str().parse::<f64>().context(msg)?;
+    let n = captures
+        .get(1)
+        .context(msg)?
+        .as_str()
+        .parse::<f64>()
+        .context(msg)?;
     let suffix = captures.get(2).map_or("m", |m| m.as_str());
     let factor = match suffix {
         "b" => 1,
@@ -835,14 +891,12 @@ pub fn input_too_small(size: u64, input_str: &Option<String>) -> Result<bool> {
 }
 
 async fn add_subtitles(input: &InputFile, vf_opts: &mut Vec<OsString>) -> Result<()> {
-    let sub_file = tempfile::Builder::new()
-        .suffix(".ass")
-        .tempfile()?;
+    let sub_file = tempfile::Builder::new().suffix(".ass").tempfile()?;
     let sub_path = sub_file.path();
     let escaped_sub_path = escape_vf_path(
         sub_path
-        .to_str()
-        .context("Could not convert temp path to utf-8. Needed for subtitles.")?,
+            .to_str()
+            .context("Could not convert temp path to utf-8. Needed for subtitles.")?,
     )?;
     dump_stream(&input.path, sub_path, false).await?;
     vf_opts.push(OsString::from(format!("subtitles={escaped_sub_path}")));
@@ -851,11 +905,13 @@ async fn add_subtitles(input: &InputFile, vf_opts: &mut Vec<OsString>) -> Result
 
 fn get_file_size(output_fname: &Path) -> Result<u64> {
     let md = output_fname.metadata()?;
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::MetadataExt;
         return Ok(md.size());
     }
-    #[cfg(windows)] {
+    #[cfg(windows)]
+    {
         use std::os::windows::fs::MetadataExt;
         return Ok(md.file_size());
     }
@@ -896,7 +952,9 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 
 fn extension_matches(fname: &Path, video_re: &Regex) -> Result<bool> {
     if let Some(extension) = fname.extension() {
-        let extension = extension.to_ascii_lowercase().to_str()
+        let extension = extension
+            .to_ascii_lowercase()
+            .to_str()
             .map(|s| s.to_string())
             .ok_or(anyhow!("Path can't be represented as utf-8: {:?}", &fname))?;
         return Ok(video_re.is_match(&extension));
@@ -919,7 +977,10 @@ fn is_same_file(pattern: &Path, matchable_path: &Path) -> bool {
         return false;
     }
 
-    return pattern_comps.rev().zip(path_comps.rev()).all(|(a, b)| a == b);
+    return pattern_comps
+        .rev()
+        .zip(path_comps.rev())
+        .all(|(a, b)| a == b);
 }
 
 fn find_executable(executable: Executable) -> Result<OsString> {
@@ -944,7 +1005,7 @@ async fn dump_stream(input_path: &Path, output_path: &Path, copy: bool) -> Resul
     let cmd = if copy { cmd.args(["-c", "copy"]) } else { cmd };
     let status = cmd.arg(output_path).status().await?;
     if !status.success() {
-        warn!( "Could not convert path {input_path:?} to {output_path:?}");
+        warn!("Could not convert path {input_path:?} to {output_path:?}");
     }
     Ok(())
 }
@@ -984,5 +1045,7 @@ fn find_subtitle_file(input: &InputFile) -> Result<Option<PathBuf>> {
 }
 
 pub fn get_output_dir(args: &Args) -> PathBuf {
-    args.output_dir.as_ref().map_or(args.video_root.join(ENCODED), |path| path.to_owned())
+    args.output_dir
+        .as_ref()
+        .map_or(args.video_root.join(ENCODED), |path| path.to_owned())
 }

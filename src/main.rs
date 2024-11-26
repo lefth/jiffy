@@ -8,7 +8,6 @@ use jiffy::{get_output_dir, Args, Encoder};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-
     let args = Args::parse();
 
     match args.quiet {
@@ -23,7 +22,9 @@ async fn main() -> Result<()> {
             env_logger::builder().filter_level(LevelFilter::Warn).init();
         }
         2.. => {
-            env_logger::builder().filter_level(LevelFilter::Error).init();
+            env_logger::builder()
+                .filter_level(LevelFilter::Error)
+                .init();
         }
     }
 
@@ -31,12 +32,18 @@ async fn main() -> Result<()> {
         bail!("Video root does not exist: {:?}", args.video_root);
     }
 
-    if let Ok(video_root) = args.video_root.canonicalize()
-    {
-        if video_root.components().last().expect("Cannot get components of encode path").as_os_str()
+    if let Ok(video_root) = args.video_root.canonicalize() {
+        if video_root
+            .components()
+            .last()
+            .expect("Cannot get components of encode path")
+            .as_os_str()
             == get_output_dir(&args)
         {
-            warn!("The video directory is named {:?}. Did you mean to encode the parent directory?", args.output_dir);
+            warn!(
+                "The video directory is named {:?}. Did you mean to encode the parent directory?",
+                args.output_dir
+            );
             thread::sleep(Duration::from_millis(2000));
         }
     }
