@@ -4,6 +4,7 @@ use std::{
     env,
     ffi::OsString,
     fs::remove_file,
+    future::Future,
     io::Write,
     path::{Path, PathBuf},
     pin::Pin,
@@ -28,6 +29,7 @@ pub use input_file::*;
 pub mod logger;
 #[allow(unused_imports)]
 pub use logger::*;
+use sysinfo::{ProcessStatus, System};
 use tokio::{io::AsyncReadExt, process::Command, select, time::sleep};
 
 pub const ENCODED: &str = "encoded";
@@ -96,6 +98,12 @@ pub struct Args {
         default_value_if("reference", "true", "true")
     )]
     pub eight_bit: bool,
+
+    /// Wait for prior ffmpeg jobs to cease, so there are `--jobs` ffmpeg
+    /// processes, not more.  (This does not deal with the case of additional
+    /// external ffmpeg jobs starting after Jiffy launches.)
+    #[clap(long)]
+    pub slow_start: bool,
 
     /// The encoding preset to use--by default this is fairly slow. By default, "5" for libaom,
     /// "slow" for x265.
@@ -357,8 +365,31 @@ impl Encoder {
         let input_files = self.get_video_paths().await?;
         let mut tasks_not_started = input_files
             .iter()
-            .map(|input_file| self.encode_video(input_file, failure_tx.clone()))
+            .map(|input_file| {
+                let job = self.encode_video(input_file, failure_tx.clone());
+                Box::pin(job) as Pin<Box<dyn Future<Output = _>>>
+            })
             .collect::<VecDeque<_>>();
+
+        if self.args.slow_start {
+            // FIXME: is this ffmpeg.exe on windows?
+            let sysinfo = sysinfo::System::new_all();
+            let running_ffmpeg = sysinfo
+                .processes_by_exact_name("ffmpeg".as_ref())
+                .collect::<Vec<_>>();
+            if running_ffmpeg.len() > 0 {
+                info!(
+                    "Starting slow while {} ffmpeg processes finish",
+                    running_ffmpeg.len()
+                );
+                for process in running_ffmpeg {
+                    tasks_not_started.push_front(Box::pin(wait_for_process(
+                        process.pid(),
+                        process.name().to_os_string(),
+                    )));
+                }
+            }
+        }
 
         let mut tasks_started = FuturesUnordered::new();
         for _ in 0..self.args.get_jobs().expect("Jobs should be set already") {
@@ -890,6 +921,21 @@ impl Encoder {
 
         return Ok(());
     }
+}
+
+async fn wait_for_process(pid: sysinfo::Pid, name: OsString) -> Result<(), EncodingErr> {
+    loop {
+        let sysinfo = System::new_all();
+        if matches!(sysinfo.process(pid), Some(process) if process.name() == name && process.status() == ProcessStatus::Run)
+        {
+            info!("Waiting for process: {pid}: {name:?}");
+            sleep(Duration::from_millis(10000)).await;
+        } else {
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 pub fn parse_size(input: &str) -> Result<u64> {
