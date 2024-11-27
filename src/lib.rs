@@ -497,13 +497,32 @@ impl Encoder {
             child_args.extend(os_args!["-x265-params", &x265_params]);
         }
 
+        // for out.mp4, make a part file: out.part.mp4
+        let partial_output_path = {
+            let mut part_extension = OsString::from("part.");
+            let extension = output_path
+                .extension()
+                .expect("Output path must have an extension");
+            part_extension.push(extension);
+            output_path.with_extension(part_extension)
+        };
+
         if self.args.overwrite {
             child_args.extend(os_args!["-y"]);
-        } else if output_path.exists() {
-            failure_tx.send((
-                output_path.to_owned(),
-                format!("Output path already exists: {output_path:?}"),
-            ))?;
+        } else if output_path.exists() || partial_output_path.exists() {
+            if output_path.exists() {
+                failure_tx.send((
+                    output_path.to_owned(),
+                    format!("Output file already exists: {output_path:?}"),
+                ))?;
+            }
+            // This may indicate an encode process is already running for that file:
+            if partial_output_path.exists() {
+                failure_tx.send((
+                    partial_output_path.to_owned(),
+                    format!("Partial output file already exists: {partial_output_path:?}"),
+                ))?;
+            }
             return Ok(());
         }
 
@@ -583,7 +602,7 @@ impl Encoder {
             }
         }
 
-        child_args.extend(os_args![&output_path]);
+        child_args.extend(os_args![&partial_output_path]);
 
         _info!(input, "");
         _info!(input, "Executing: {:?} {:?}", &self.ffmpeg_path, child_args);
@@ -638,7 +657,15 @@ impl Encoder {
             };
 
             if let Some(exit_status) = exit_status {
-                if !exit_status.success() {
+                if exit_status.success() {
+                    if !self.args.overwrite && output_path.exists() {
+                        bail!(
+                            "Finished writing part file without --overwrite, but now the full output path exists: {:?}",
+                            &output_path
+                        )
+                    }
+                    tokio::fs::rename(&partial_output_path, &output_path).await?;
+                } else {
                     let mut msg = String::from("Encoding error. Check ffmpeg args");
                     if !self.args.no_map_0 {
                         msg += ", or try again without `-map 0`";
