@@ -42,6 +42,7 @@ pub enum Codec {
     Copy,
 }
 
+// TODO: the encode dir is unnecessary if both --include and -o are specified
 #[derive(Parser)]
 pub struct Args {
     /// Set the quality level (for either encoded). The default is 24 for AV1 and 22 for H265, but
@@ -177,6 +178,7 @@ pub struct Args {
     #[clap(long)]
     pub exclude: Vec<String>,
 
+    // FIXME: --include does not take full paths
     /// Paths (usually glob patterns) to be included; all others are excluded. They match from the
     /// video encode root. If `--include` and `--exclude` are both given, only those that are
     /// matched by the include globs and not matched by the exclude globs will be encoded.  See the
@@ -1047,8 +1049,16 @@ fn extension_matches(fname: &Path, video_re: &Regex) -> Result<bool> {
 }
 
 fn is_same_file(pattern: &Path, matchable_path: &Path) -> bool {
+    // FIXME: this might not work with non-local paths, like jiffy /tmp/vids --exclude /tmp/vids/foo.mp4
+    // or jiffy vids --exclude vids/foo.mp4
+    debug!("Comparing paths: {:?} and {:?}", pattern, matchable_path);
+
     if let Ok(canonical_pattern) = pattern.canonicalize() {
         if let Ok(canonical_path) = matchable_path.canonicalize() {
+            debug!(
+                "Paths' canonical forms are equal: {}",
+                canonical_path == canonical_pattern
+            );
             if canonical_path == canonical_pattern {
                 return true;
             }
@@ -1058,13 +1068,22 @@ fn is_same_file(pattern: &Path, matchable_path: &Path) -> bool {
     let pattern_comps = pattern.components();
     let path_comps = matchable_path.components();
     if pattern_comps.clone().count() > path_comps.clone().count() {
+        debug!(
+            "Not equal because component counts differ: {:?} and {:?}",
+            pattern, matchable_path
+        );
         return false;
     }
 
-    return pattern_comps
+    let are_match = pattern_comps
         .rev()
         .zip(path_comps.rev())
         .all(|(a, b)| a == b);
+    debug!(
+        "Files are a match?: {} ({:?} and {:?})",
+        are_match, pattern, matchable_path
+    );
+    return are_match;
 }
 
 fn find_executable(executable: Executable) -> Result<OsString> {
