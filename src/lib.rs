@@ -244,6 +244,10 @@ impl Args {
         }
     }
 
+    pub fn get_verbosity(&self) -> i8 {
+        self.verbose as i8 - self.quiet as i8
+    }
+
     /// How many jobs should run in parallel?
     fn get_jobs(&self) -> Result<usize> {
         let jobs = match self.jobs {
@@ -460,24 +464,24 @@ impl Encoder {
         // Options for -vf:
         let mut vf = Vec::<OsString>::new();
 
-        match self.args.quiet as i8 - self.args.verbose as i8 {
-            ..0 => {}
-            0 => {
-                child_args.extend(os_args!(str: "-loglevel info"));
-            }
-            1 => {
-                child_args.extend(os_args!(str: "-loglevel warning"));
-            }
-            2 => {
-                child_args.extend(os_args!(str: "-loglevel error"));
-                child_args.extend(os_args!(str: "-x265-params loglevel=warning"));
-                // child_args.extend(os_args!(str: "-aom-params quiet")); // not supported
-            }
-            3.. => {
+        match self.args.get_verbosity() {
+            ..-2 => {
                 child_args.extend(os_args!(str: "-loglevel error"));
                 child_args.extend(os_args!(str: "-x265-params loglevel=error"));
                 // child_args.extend(os_args!(str: "-aom-params quiet")); // not supported
             }
+            -2 => {
+                child_args.extend(os_args!(str: "-loglevel error"));
+                child_args.extend(os_args!(str: "-x265-params loglevel=warning"));
+                // child_args.extend(os_args!(str: "-aom-params quiet")); // not supported
+            }
+            -1 => {
+                child_args.extend(os_args!(str: "-loglevel warning"));
+            }
+            0 => {
+                child_args.extend(os_args!(str: "-loglevel info"));
+            }
+            1.. => {}
         }
 
         child_args.extend(os_args!(

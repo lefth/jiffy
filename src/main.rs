@@ -11,13 +11,13 @@ use jiffy::{get_output_dir, Args, Encoder};
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    match args.quiet as i8 - args.verbose as i8 {
-        ..-1 => {
+    match args.get_verbosity() {
+        2.. => {
             env_logger::builder()
                 .filter_level(LevelFilter::Trace)
                 .init();
         }
-        -1 => {
+        1 => {
             env_logger::builder()
                 .filter_level(LevelFilter::Debug)
                 .init();
@@ -29,10 +29,10 @@ async fn main() -> Result<()> {
                 env_logger::builder().filter_level(LevelFilter::Info).init();
             }
         }
-        1 => {
+        -1 => {
             env_logger::builder().filter_level(LevelFilter::Warn).init();
         }
-        2.. => {
+        ..-1 => {
             env_logger::builder()
                 .filter_level(LevelFilter::Error)
                 .init();
