@@ -12,22 +12,22 @@ use tokio::process::Command;
 
 #[allow(unused_imports)]
 use crate::{_debug, _error, _info, _log, _trace, _warn};
-use crate::{find_executable, get_output_dir, normalize_path, Args, Codec, Executable};
+use crate::{find_executable, get_output_dir, normalize_path, Cli, Codec, Executable};
 
 pub struct InputFile {
     pub path: PathBuf,
     pub log_path: Option<PathBuf>,
     pub crf: u8,
-    args: Arc<Args>,
+    cli: Arc<Cli>,
 }
 
 impl InputFile {
-    pub async fn new(path: &Path, args: Arc<Args>) -> Result<Self> {
+    pub async fn new(path: &Path, cli: Arc<Cli>) -> Result<Self> {
         let mut ret = Self {
             path: path.to_owned(),
-            log_path: Self::get_log_path(path, &args)?,
+            log_path: Self::get_log_path(path, &cli)?,
             crf: u8::MAX, // placeholder
-            args,
+            cli,
         };
         ret.init().await?;
         Ok(ret)
@@ -44,7 +44,10 @@ impl InputFile {
         let video_root = normalize_path(video_root);
 
         if video_root == PathBuf::from(".") {
-            assert!(input_path.is_relative(), "Video rooted in path '.' must be relative.");
+            assert!(
+                input_path.is_relative(),
+                "Video rooted in path '.' must be relative."
+            );
             return Ok(input_path.to_owned());
         }
 
@@ -55,9 +58,16 @@ impl InputFile {
             .components()
             .skip(video_root.components().count())
             .collect::<PathBuf>())
-        }
+    }
 
-    pub fn fill_output_template(naming_format: &str, directory: PathBuf, basename: &str, preset: &str, crf: &str, extension: &str) -> PathBuf {
+    pub fn fill_output_template(
+        naming_format: &str,
+        directory: PathBuf,
+        basename: &str,
+        preset: &str,
+        crf: &str,
+        extension: &str,
+    ) -> PathBuf {
         let name = naming_format.replace("{basename}", basename);
         let name = name.replace("{preset}", preset);
         let name = name.replace("{crf}", crf);
@@ -67,9 +77,10 @@ impl InputFile {
     }
 
     pub fn get_output_path(&self, naming_format: Option<String>) -> Result<PathBuf> {
-        let output_dir = get_output_dir(&self.args);
+        let output_dir = get_output_dir(&self.cli);
 
-        let extension = self.path
+        let extension = self
+            .path
             .extension()
             .map(|extension| extension.to_ascii_lowercase().to_string_lossy().to_string());
         // Let mp4 keep its extension, but change others to mkv:
@@ -78,31 +89,40 @@ impl InputFile {
             _ => "mkv",
         };
 
-        let basename = Self::trim_input_path(&self.path, &self.args.video_root)?
-            .with_extension("").to_string_lossy().to_string();
+        let basename = Self::trim_input_path(&self.path, &self.cli.video_root)?
+            .with_extension("")
+            .to_string_lossy()
+            .to_string();
 
         let naming_format = naming_format.unwrap_or({
-            if self.args.get_video_codec() == Codec::Av1 {
+            if self.cli.get_video_codec() == Codec::Av1 {
                 "{basename}-{preset}-crf{crf}"
             } else {
                 "{basename}-crf{crf}"
-            }.into()
+            }
+            .into()
         });
 
         Ok(Self::fill_output_template(
-            &naming_format, output_dir, &basename, &self.args.preset, &self.crf.to_string(), extension))
+            &naming_format,
+            output_dir,
+            &basename,
+            &self.cli.preset,
+            &self.crf.to_string(),
+            extension,
+        ))
     }
 
     /// Get the log path for this input file. Also create the directory for the log
     /// file, since logging starts before encoding, so the directory may not exist
     /// if we delay.
-    fn get_log_path(input_path: &Path, args: &Args) -> Result<Option<PathBuf>> {
-        if args.no_log {
+    fn get_log_path(input_path: &Path, cli: &Cli) -> Result<Option<PathBuf>> {
+        if cli.no_log {
             Ok(None)
         } else {
-            let output_dir = get_output_dir(args);
+            let output_dir = get_output_dir(cli);
             let mut output = output_dir
-                .join(Self::trim_input_path(&input_path, &args.video_root)?)
+                .join(Self::trim_input_path(&input_path, &cli.video_root)?)
                 .into_os_string();
             output.push(".log");
 
@@ -111,18 +131,18 @@ impl InputFile {
     }
 
     async fn init(&mut self) -> Result<()> {
-        let codec = self.args.get_video_codec();
-        self.crf = if let Some(crf) = self.args.crf {
+        let codec = self.cli.get_video_codec();
+        self.crf = if let Some(crf) = self.cli.crf {
             crf
         } else {
             let mut crf = match codec {
                 Codec::Av1 => 24,
                 Codec::H265 => 22,
-                Codec::H264 if self.args.for_tv => 17,
+                Codec::H264 if self.cli.for_tv => 17,
                 Codec::H264 => 8, // if not for TV, this old codec is most useful for making a reference clip
                 Codec::Copy => 0,
             };
-            if self.args.anime {
+            if self.cli.anime {
                 crf += 3;
             }
 
@@ -221,10 +241,11 @@ impl InputFile {
         let output = String::from_utf8_lossy(&output).to_owned();
 
         let time_regex = Regex::new(r"(\d+):(\d{2}):(\d{2}\.\d+)").unwrap();
-        let captures = time_regex.captures_iter(&output).last().expect(
-            &format!("Could not find a time in the ffmpeg output. A bug report containing the input file \
-                or the ffmpeg output would be appreciated. Input file={}", &self.path.to_string_lossy()),
-        );
+        let captures = time_regex.captures_iter(&output).last().expect(&format!(
+            "Could not find a time in the ffmpeg output. A bug report containing the input file \
+                or the ffmpeg output would be appreciated. Input file={}",
+            &self.path.to_string_lossy()
+        ));
 
         let seconds = captures.get(1).unwrap().as_str().parse::<f32>()? * 3600f32
             + captures.get(2).unwrap().as_str().parse::<f32>()? * 60f32
@@ -294,10 +315,17 @@ impl InputFile {
         let output = String::from_utf8(output.stdout)?;
         // Some versions of ffprobe add an extra 'x' at the end:
         let re = Regex::new(r"(\d+)x(\d+)x?").unwrap();
-        return re.captures(&output).map(|cap|
-            (cap.get(1).unwrap().as_str().parse::<u32>().unwrap(),
-            cap.get(2).unwrap().as_str().parse::<u32>().unwrap()))
-        .context(format!("Could not parse dimensions of file '{str}': '{output}'"));
+        return re
+            .captures(&output)
+            .map(|cap| {
+                (
+                    cap.get(1).unwrap().as_str().parse::<u32>().unwrap(),
+                    cap.get(2).unwrap().as_str().parse::<u32>().unwrap(),
+                )
+            })
+            .context(format!(
+                "Could not parse dimensions of file '{str}': '{output}'"
+            ));
     }
 
     /// Get the last part of the filename (without directory parts).
@@ -347,7 +375,9 @@ impl InputFile {
 
     pub(crate) fn create_log_directory(&self) -> Result<()> {
         if let Some(log_path) = self.log_path.as_ref() {
-            let parent = log_path.parent().context(format!("Log path does not have a parent: {log_path:?}"))?;
+            let parent = log_path
+                .parent()
+                .context(format!("Log path does not have a parent: {log_path:?}"))?;
             std::fs::create_dir_all(parent)?;
         }
         Ok(())

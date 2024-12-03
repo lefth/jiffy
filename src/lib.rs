@@ -44,7 +44,7 @@ pub enum Codec {
 
 // TODO: the encode dir is unnecessary if both --include and -o are specified
 #[derive(Parser)]
-pub struct Args {
+pub struct Cli {
     /// Set the quality level (for either encoded). The default is 24 for AV1 and 22 for H265, but
     /// if unspecified, a better CRF may be used for small videos, or a lower quality CRF may be
     /// used for animation.
@@ -233,7 +233,7 @@ pub struct Args {
     pub output_dir: Option<PathBuf>,
 }
 
-impl Args {
+impl Cli {
     pub fn get_video_codec(&self) -> Codec {
         if self.copy_streams {
             Codec::Copy
@@ -346,7 +346,7 @@ enum Executable {
 struct EncodingErr(PathBuf, String);
 
 pub struct Encoder {
-    args: Arc<Args>,
+    cli: Arc<Cli>,
     exclude_as_paths: Vec<PathBuf>,
     include_as_paths: Vec<PathBuf>,
     ffmpeg_path: OsString,
@@ -354,12 +354,12 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    pub fn new(args: Args) -> Result<Encoder> {
-        let exclude_as_paths = args.exclude.iter().map(PathBuf::from).collect();
-        let include_as_paths = args.include.iter().map(PathBuf::from).collect();
+    pub fn new(cli: Cli) -> Result<Encoder> {
+        let exclude_as_paths = cli.exclude.iter().map(PathBuf::from).collect();
+        let include_as_paths = cli.include.iter().map(PathBuf::from).collect();
         return Ok(Encoder {
-            video_root: args.video_root.clone(),
-            args: Arc::new(args),
+            video_root: cli.video_root.clone(),
+            cli: Arc::new(cli),
             exclude_as_paths,
             include_as_paths,
             ffmpeg_path: find_executable(Executable::FFMPEG)?,
@@ -377,7 +377,7 @@ impl Encoder {
             })
             .collect::<VecDeque<_>>();
 
-        if self.args.slow_start {
+        if self.cli.slow_start {
             // FIXME: is this ffmpeg.exe on windows?
             let sysinfo = sysinfo::System::new_all();
             let running_ffmpeg = sysinfo
@@ -398,7 +398,7 @@ impl Encoder {
         }
 
         let mut tasks_started = FuturesUnordered::new();
-        for _ in 0..self.args.get_jobs().expect("Jobs should be set already") {
+        for _ in 0..self.cli.get_jobs().expect("Jobs should be set already") {
             if let Some(task) = tasks_not_started.pop_front() {
                 log::trace!("Pushing a task into the job list (not started)");
                 tasks_started.push(task);
@@ -449,7 +449,7 @@ impl Encoder {
         input: &InputFile,
         failure_tx: Sender<(PathBuf, String)>,
     ) -> Result<()> {
-        let output_path = input.get_output_path(self.args.output_name.clone())?;
+        let output_path = input.get_output_path(self.cli.output_name.clone())?;
         let parent = output_path
             .parent()
             .expect("Generated path must have a parent directory");
@@ -466,7 +466,7 @@ impl Encoder {
         // Options for -vf:
         let mut vf = Vec::<OsString>::new();
 
-        match self.args.get_verbosity() {
+        match self.cli.get_verbosity() {
             ..-2 => {
                 child_args.extend(os_args!(str: "-loglevel error"));
                 child_args.extend(os_args!(str: "-x265-params loglevel=error"));
@@ -488,16 +488,16 @@ impl Encoder {
 
         child_args.extend(os_args!(
             str: "-nostdin -map_metadata 0 -movflags +faststart -movflags +use_metadata_tags -strict experimental"));
-        let codec = self.args.get_video_codec();
+        let codec = self.cli.get_video_codec();
         if codec != Codec::Copy {
             child_args.extend(os_args!["-crf", input.crf.to_string()]);
         }
 
-        if !self.args.no_map_0 {
+        if !self.cli.no_map_0 {
             child_args.extend(os_args!(str: "-map 0"));
         }
 
-        if self.args.for_tv {
+        if self.cli.for_tv {
             if input.contains_subtitle().await? {
                 if let Err(err) = add_subtitles(input, &mut vf).await {
                     failure_tx.send((
@@ -544,7 +544,7 @@ impl Encoder {
             output_path.with_extension(part_extension)
         };
 
-        if self.args.overwrite {
+        if self.cli.overwrite {
             child_args.extend(os_args!["-y"]);
         } else if output_path.exists() || partial_output_path.exists() {
             if output_path.exists() {
@@ -572,25 +572,25 @@ impl Encoder {
                 Codec::H265 => os_args!(str: "-c:v libx265 -preset"),
                 // NOTE: not tested. Let me know if these parameters don't work well with Chromecast,
                 // or some other TV-related use-case.
-                Codec::H264 if self.args.for_tv =>
+                Codec::H264 if self.cli.for_tv =>
                     os_args!(str: "-c:v libx264 -maxrate 10M -bufsize 16M -profile:v high -level 4.1 -preset"),
                 Codec::H264 => os_args!(str: "-c:v libx264 -profile:v high -level 4.1 -preset"),
                 _ => bail!("Codec not handled: {codec:?}"),
             });
-            child_args.push(OsString::from(&self.args.preset));
+            child_args.push(OsString::from(&self.cli.preset));
 
-            let max_height = self.args.get_height();
+            let max_height = self.cli.get_height();
             // This -vf argument string was pretty thoroughly tested: it makes the shorter dimension equivalent to
             // the desired height (or width for portrait mode), without changing the aspect ratio, and without upscaling.
             // Using -2 instead of -1 ensures that the scaled dimension will be a factor of 2. Some filters need that.
             let vf_height = format!("scale=if(gte(iw\\,ih)\\,-2\\,min({max_height}\\,iw)):if(gte(iw\\,ih)\\,min({max_height}\\,ih)\\,-2)").into();
-            let vf_pix_fmt: OsString = if self.args.eight_bit {
+            let vf_pix_fmt: OsString = if self.cli.eight_bit {
                 "format=yuv420p".into()
             } else {
                 "format=yuv420p10le".into()
             };
             vf.extend([vf_height, vf_pix_fmt]);
-            vf.extend(self.args.get_extra_vf_flags()?.iter().map(|s| s.into()));
+            vf.extend(self.cli.get_extra_vf_flags()?.iter().map(|s| s.into()));
 
             // Transform list into string:
             let vf = {
@@ -625,7 +625,7 @@ impl Encoder {
             child_args.extend(env_ffmpeg_args.split_whitespace().map(OsString::from));
         }
 
-        child_args.extend(self.args.get_extra_normal_flags()?.iter().map(|s| s.into()));
+        child_args.extend(self.cli.get_extra_normal_flags()?.iter().map(|s| s.into()));
         match env::var("FFMPEG_FLAGS") {
             Ok(env_args) => {
                 child_args.extend(env_args.to_string().split_whitespace().map(|s| s.into()));
@@ -665,7 +665,7 @@ impl Encoder {
         let orig_size = get_file_size(&input.path).context(format!(
             "Could not get original file disk space before encoding"
         ))?;
-        if input_too_small(orig_size, &self.args.minimum_size)? {
+        if input_too_small(orig_size, &self.cli.minimum_size)? {
             bail!("Skipping file as too small to encode");
         }
 
@@ -695,7 +695,7 @@ impl Encoder {
 
             if let Some(exit_status) = exit_status {
                 if exit_status.success() {
-                    if !self.args.overwrite && output_path.exists() {
+                    if !self.cli.overwrite && output_path.exists() {
                         bail!(
                             "Finished writing part file without --overwrite, but now the full output path exists: {:?}",
                             &output_path
@@ -704,7 +704,7 @@ impl Encoder {
                     tokio::fs::rename(&partial_output_path, &output_path).await?;
                 } else {
                     let mut msg = String::from("Encoding error. Check ffmpeg args");
-                    if !self.args.no_map_0 {
+                    if !self.cli.no_map_0 {
                         msg += ", or try again without `-map 0`";
                     }
                     // This error is significant enough to show right away, not just at the end:
@@ -723,19 +723,19 @@ impl Encoder {
     async fn get_audio_args(&self, input: &InputFile) -> Option<Vec<OsString>> {
         let default = Some(os_args!["-c:a", "aac", "-b:a", "128k", "-ac", "2"]);
         let audio_copy_arg = Some(os_args!["-c:a", "copy"]);
-        if self.args.no_audio {
+        if self.cli.no_audio {
             _debug!(input, "Removing audio entirely, due to argument");
             return Some(os_args!["-an"]);
-        } else if self.args.copy_audio {
+        } else if self.cli.copy_audio {
             _debug!(
                 input,
                 "Skipping audio bitrate check and not encoding, due to argument"
             );
             return audio_copy_arg;
-        } else if self.args.skip_audio_bitrate_check {
+        } else if self.cli.skip_audio_bitrate_check {
             _debug!(input, "Skipping audio bitrate check due to option chosen.");
             return default;
-        } else if self.args.for_tv {
+        } else if self.cli.for_tv {
             _debug!(
                 input,
                 "Skipping audio bitrate check: always encode for TV playback"
@@ -756,13 +756,13 @@ impl Encoder {
     }
 
     fn get_x265_params(&self, crf: u8) -> Option<Vec<&str>> {
-        if self.args.av1 || !self.args.anime {
+        if self.cli.av1 || !self.cli.anime {
             None
         } else {
-            assert!(self.args.anime);
+            assert!(self.cli.anime);
 
             // These encoding tips are from: https://kokomins.wordpress.com/2019/10/10/anime-encoding-guide-for-x265-and-why-to-never-use-flac/
-            let x265_params = if self.args.anime_slow_well_lit {
+            let x265_params = if self.cli.anime_slow_well_lit {
                 vec![
                     "bframes=8",
                     "psy-rd=1",
@@ -770,7 +770,7 @@ impl Encoder {
                     "aq-strength=0.8",
                     "deblock=1,1",
                 ]
-            } else if self.args.anime_mixed_dark_battle {
+            } else if self.cli.anime_mixed_dark_battle {
                 if crf >= 19 {
                     // Note: recommended if: non-complex, motion only alternative
                     vec![
@@ -803,16 +803,16 @@ impl Encoder {
     /// (This directory is considered the encode directory.)
     async fn get_video_paths(&self) -> Result<Vec<InputFile>> {
         let mut exclude = GlobSetBuilder::new();
-        for pattern in &self.args.exclude {
+        for pattern in &self.cli.exclude {
             exclude.add(Glob::new(&pattern)?);
         }
         let exclude = exclude.build()?;
 
-        let include = if self.args.include.is_empty() {
+        let include = if self.cli.include.is_empty() {
             None
         } else {
             let mut include = GlobSetBuilder::new();
-            for pattern in &self.args.include {
+            for pattern in &self.cli.include {
                 include.add(Glob::new(&pattern)?);
             }
             Some(include.build()?)
@@ -823,7 +823,7 @@ impl Encoder {
         )?;
         let mut videos = Vec::new();
         let mut dirs = VecDeque::from([self.video_root.to_owned()]);
-        let encode_dir = get_output_dir(&self.args);
+        let encode_dir = get_output_dir(&self.cli);
         while let Some(dir) = dirs.pop_front() {
             let mut entries = Vec::new();
             for entry in dir.read_dir()? {
@@ -836,7 +836,7 @@ impl Encoder {
                 )
             });
             for entry in entries {
-                if let Some(limit) = self.args.limit {
+                if let Some(limit) = self.cli.limit {
                     if videos.len() == limit {
                         log::debug!("Reached video limit={limit}, won't encode any more");
                         return Ok(videos);
@@ -881,7 +881,7 @@ impl Encoder {
                 if md.is_dir() {
                     dirs.push_back(fname);
                 } else if extension_matches(&fname, &video_re)? {
-                    videos.push(InputFile::new(&fname, self.args.clone()).await?);
+                    videos.push(InputFile::new(&fname, self.cli.clone()).await?);
                 }
             }
         }
@@ -909,9 +909,9 @@ impl Encoder {
         }
 
         let percent = size * 100 / orig_size;
-        if let Some(expected_size) = self.args.expected_size {
+        if let Some(expected_size) = self.cli.expected_size {
             if percent > expected_size.into() {
-                if self.args.delete_too_large {
+                if self.cli.delete_too_large {
                     failure_tx.send((input_path, format!("Deleting too large output file (too large at {percent}%): {output_path:?}"))).unwrap();
                     remove_file(output_path)?;
                 } else {
@@ -919,7 +919,7 @@ impl Encoder {
                 }
             } else if percent < (expected_size / 3).into() {
                 failure_tx.send((input_path, format!("Output file was much smaller than expected at {percent}%: {output_path:?}"))).unwrap();
-            } else if percent > 100 && self.args.delete_too_large {
+            } else if percent > 100 && self.cli.delete_too_large {
                 failure_tx.send((input_path, format!("Deleting output file larger than the original ({percent}%): {output_path:?}"))).unwrap();
                 remove_file(output_path)?;
             }
@@ -1147,8 +1147,8 @@ fn find_subtitle_file(input: &InputFile) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-pub fn get_output_dir(args: &Args) -> PathBuf {
-    args.output_dir
+pub fn get_output_dir(cli: &Cli) -> PathBuf {
+    cli.output_dir
         .as_ref()
-        .map_or(args.video_root.join(ENCODED), |path| path.to_owned())
+        .map_or(cli.video_root.join(ENCODED), |path| path.to_owned())
 }
