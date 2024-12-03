@@ -16,7 +16,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Args, Parser};
 use futures::stream::{FuturesUnordered, StreamExt};
 use globset::{Glob, GlobSetBuilder};
 use lexical_sort;
@@ -119,27 +119,9 @@ pub struct Cli {
     pub preset: String,
 
     /// Overwrite existing output files
+    // TODO: integration test that --overwrite and --noop still does not overwrite files
     #[clap(long)]
     pub overwrite: bool,
-
-    /// Add additional ffmpeg flags, such as "-to 5:00" to quickly test the first few minutes of a
-    /// file.  Each option should be passed separately, for example:
-    /// `jiffy --extra-flag='-ss 30' --extra-flag='-t 5:00'`
-    #[clap(long, allow_hyphen_values(true))]
-    pub extra_flag: Vec<String>,
-
-    /// Don't write log files for each ffmpeg invocation. This avoids polluting your output
-    /// directory with a log file per input.
-    #[clap(long, short)]
-    pub no_log: bool,
-
-    /// Can specify -q -q (-qq) to make the program ever more quiet.
-    #[clap(long, short, action = ArgAction::Count)]
-    pub quiet: u8,
-
-    /// Increase the log verbosity.
-    #[clap(long, short, action = ArgAction::Count)]
-    pub verbose: u8,
 
     /// Don't check if the audio streams are within acceptable limits--just reencode them (unless
     /// `--copy-audio` was specified). This saves a little time in some circumstances.
@@ -149,21 +131,6 @@ pub struct Cli {
         default_value_if("no_audio", "true", "true")
     )]
     pub skip_audio_bitrate_check: bool,
-
-    /// Keep the audio stream unchanged. This is useful if audio bitrate can't be determined.
-    #[clap(long = "copy-audio", default_value_if("copy_streams", "true", "true"))]
-    pub copy_audio: bool,
-
-    /// Copy audio and video streams (don't encode). Used for testing, for example passing
-    /// `--copy-streams --extra-flag='-to 30'` would copy a 30 second from each video. Implies
-    /// `--copy-audio`.
-    #[clap(long = "copy-streams", conflicts_with_all = ["av1", "x265", "reference", "for_tv", "height_720p",
-        "anime", "anime_mixed_dark_battle", "anime_slow_well_lit", "crf", "preset"])]
-    pub copy_streams: bool,
-
-    /// For testing and benchmarking.
-    #[clap(long = "no-audio", conflicts_with = "copy_audio")]
-    pub no_audio: bool,
 
     /// Encode the videos in this directory. By default, encode in the current directory. Output
     /// files are put in "video_root/encoded". If the given path ends in "encoded", the real video
@@ -185,10 +152,6 @@ pub struct Cli {
     /// `--exclude` option.
     #[clap(long)]
     pub include: Vec<String>,
-
-    /// Run ffmpeg without `-map 0`. This occasionally fixes an encoding error.
-    #[clap(long, default_value_if("for_tv", "true", "true"))]
-    pub no_map_0: bool,
 
     /// Encode a certain number of files, then stop.
     #[clap(long)]
@@ -231,11 +194,60 @@ pub struct Cli {
     /// <VIDEO_ROOT>/encoded.
     #[clap(long, short, aliases = ["output-directory", "output-dir", "output-path"])]
     pub output_dir: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub test_opts: TestOpts,
+}
+
+#[derive(Args)]
+#[group(required = false, multiple = true)]
+pub struct TestOpts {
+    /// Run through all logic except invoking ffmpeg.
+    #[clap(long)]
+    pub noop: bool,
+
+    /// Run ffmpeg without `-map 0`. This occasionally fixes an encoding error.
+    #[clap(long, default_value_if("for_tv", "true", "true"))]
+    pub no_map_0: bool,
+
+    /// Keep the audio stream unchanged. This is useful if audio bitrate can't be determined.
+    #[clap(long = "copy-audio", default_value_if("copy_streams", "true", "true"))]
+    pub copy_audio: bool,
+
+    /// Copy audio and video streams (don't encode). Used for testing, for example passing
+    /// `--copy-streams --extra-flag='-to 30'` would copy a 30 second from each video. Implies
+    /// `--copy-audio`.
+    #[clap(long = "copy-streams", conflicts_with_all = ["av1", "x265", "reference", "for_tv", "height_720p",
+        "anime", "anime_mixed_dark_battle", "anime_slow_well_lit", "crf", "preset"])]
+    pub copy_streams: bool,
+
+    /// For testing and benchmarking.
+    #[clap(long = "no-audio", conflicts_with = "copy_audio")]
+    pub no_audio: bool,
+
+    /// Add additional ffmpeg flags, such as "-to 5:00" to quickly test the first few minutes of a
+    /// file.  Each option should be passed separately, for example:
+    /// `jiffy --extra-flag='-ss 30' --extra-flag='-t 5:00'`
+    #[clap(long, allow_hyphen_values(true))]
+    pub extra_flag: Vec<String>,
+
+    /// Don't write log files for each ffmpeg invocation. This avoids polluting your output
+    /// directory with a log file per input.
+    #[clap(long, short)]
+    pub no_log: bool,
+
+    /// Can specify -q -q (-qq) to make the program ever more quiet.
+    #[clap(long, short, action = ArgAction::Count)]
+    pub quiet: u8,
+
+    /// Increase the log verbosity.
+    #[clap(long, short, action = ArgAction::Count)]
+    pub verbose: u8,
 }
 
 impl Cli {
     pub fn get_video_codec(&self) -> Codec {
-        if self.copy_streams {
+        if self.test_opts.copy_streams {
             Codec::Copy
         } else if self.reference || self.for_tv {
             Codec::H264
@@ -247,7 +259,7 @@ impl Cli {
     }
 
     pub fn get_verbosity(&self) -> i8 {
-        self.verbose as i8 - self.quiet as i8
+        self.test_opts.verbose as i8 - self.test_opts.quiet as i8
     }
 
     /// How many jobs should run in parallel?
@@ -272,6 +284,7 @@ impl Cli {
     fn get_extra_flags(&self) -> Result<Vec<String>> {
         let whitespace_re = Regex::new(r"\s+")?;
         Ok(self
+            .test_opts
             .extra_flag
             .iter()
             .flat_map(|extra_flag| {
@@ -493,7 +506,7 @@ impl Encoder {
             child_args.extend(os_args!["-crf", input.crf.to_string()]);
         }
 
-        if !self.cli.no_map_0 {
+        if !self.cli.test_opts.no_map_0 {
             child_args.extend(os_args!(str: "-map 0"));
         }
 
@@ -668,6 +681,10 @@ impl Encoder {
         if input_too_small(orig_size, &self.cli.minimum_size)? {
             bail!("Skipping file as too small to encode");
         }
+        if self.cli.test_opts.noop {
+            _info!(input, "Not running ffmpeg because of --noop");
+            return Ok(());
+        }
 
         let mut child = command
             .stdout(std::process::Stdio::piped())
@@ -704,7 +721,7 @@ impl Encoder {
                     tokio::fs::rename(&partial_output_path, &output_path).await?;
                 } else {
                     let mut msg = String::from("Encoding error. Check ffmpeg args");
-                    if !self.cli.no_map_0 {
+                    if !self.cli.test_opts.no_map_0 {
                         msg += ", or try again without `-map 0`";
                     }
                     // This error is significant enough to show right away, not just at the end:
@@ -723,10 +740,10 @@ impl Encoder {
     async fn get_audio_args(&self, input: &InputFile) -> Option<Vec<OsString>> {
         let default = Some(os_args!["-c:a", "aac", "-b:a", "128k", "-ac", "2"]);
         let audio_copy_arg = Some(os_args!["-c:a", "copy"]);
-        if self.cli.no_audio {
+        if self.cli.test_opts.no_audio {
             _debug!(input, "Removing audio entirely, due to argument");
             return Some(os_args!["-an"]);
-        } else if self.cli.copy_audio {
+        } else if self.cli.test_opts.copy_audio {
             _debug!(
                 input,
                 "Skipping audio bitrate check and not encoding, due to argument"

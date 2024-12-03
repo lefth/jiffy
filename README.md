@@ -30,24 +30,15 @@ Options:
       --8-bit                          Encode as 8-bit.  Otherwise the video will be 10-bit, except if creating a file
                                        as reference or for TV. However, this depends on the compilation options of the
                                        encoder
+      --slow-start                     Wait for prior ffmpeg jobs to cease, so there are `--jobs` ffmpeg processes, not
+                                       more.  (This does not deal with the case of additional external ffmpeg jobs
+                                       starting after Jiffy launches.)
       --preset <PRESET>                The encoding preset to use--by default this is fairly slow. By default, "5" for
                                        libaom, "slow" for x265
       --overwrite                      Overwrite existing output files
-      --extra-flag <EXTRA_FLAG>        Add additional ffmpeg flags, such as "-to 5:00" to quickly test the first few
-                                       minutes of a file.  Each option should be passed separately, for example: `jiffy
-                                       --extra-flag='-ss 30' --extra-flag='-t 5:00'`
-  -n, --no-log                         Don't write log files for each ffmpeg invocation. This avoids polluting your
-                                       output directory with a log file per input
-  -q, --quiet...                       Can specify -q -q (-qq) to make the program ever more quiet
       --skip-bitrate-check             Don't check if the audio streams are within acceptable limits--just reencode them
                                        (unless `--copy-audio` was specified). This saves a little time in some
                                        circumstances
-      --copy-audio                     Keep the audio stream unchanged. This is useful if audio bitrate can't be
-                                       determined
-      --copy-streams                   Copy audio and video streams (don't encode). Used for testing, for example
-                                       passing `--copy-streams --extra-flag='-to 30'` would copy a 30 second from each
-                                       video. Implies `--copy-audio`
-      --no-audio                       For testing and benchmarking
       --exclude <EXCLUDE>              Paths (usually glob patterns) that can be excluded. They match from the video
                                        encode root. For example, "*S01*/*E01*" might be used to skip the first episode
                                        of a TV show, and "**/*E01*" would skip the first episode of each season. This
@@ -56,7 +47,6 @@ Options:
                                        from the video encode root. If `--include` and `--exclude` are both given, only
                                        those that are matched by the include globs and not matched by the exclude globs
                                        will be encoded.  See the `--exclude` option
-      --no-map-0                       Run ffmpeg without `-map 0`. This occasionally fixes an encoding error
       --limit <LIMIT>                  Encode a certain number of files, then stop
       --for-tv                         Make a high quality but inefficient file for low spec televisions. The output is
                                        intended for watching, not for archival purposes. This is the only option that
@@ -72,7 +62,24 @@ Options:
                                        to mean megabytes
       --output-name <OUTPUT_NAME>      Output files will be written with this name. Fields that will be filled:
                                        {preset}, {basename}, {crf} For example: --output-name "{basename}-crf{crf}"
-  -o, --output-dir <OUTPUT_DIR>        Output files will be saved in this directory [default: encoded]
+  -o, --output-dir <OUTPUT_DIR>        Output files will be saved in this directory. By default, it is
+                                       <VIDEO_ROOT>/encoded
+Debug options:
+      --noop                           Run through all logic except invoking ffmpeg
+      --no-map-0                       Run ffmpeg without `-map 0`. This occasionally fixes an encoding error
+      --copy-audio                     Keep the audio stream unchanged. This is useful if audio bitrate can't be
+                                       determined
+      --copy-streams                   Copy audio and video streams (don't encode). Used for testing, for example
+                                       passing `--copy-streams --extra-flag='-to 30'` would copy a 30 second from each
+                                       video. Implies `--copy-audio`
+      --no-audio                       For testing and benchmarking
+      --extra-flag <EXTRA_FLAG>        Add additional ffmpeg flags, such as "-to 5:00" to quickly test the first few
+                                       minutes of a file.  Each option should be passed separately, for example: `jiffy
+                                       --extra-flag='-ss 30' --extra-flag='-t 5:00'`
+  -n, --no-log                         Don't write log files for each ffmpeg invocation. This avoids polluting your
+                                       output directory with a log file per input
+  -q, --quiet...                       Can specify -q -q (-qq) to make the program ever more quiet
+  -v, --verbose...                     Increase the log verbosity
   -h, --help                           Print help
 ```
 

@@ -117,7 +117,7 @@ impl InputFile {
     /// file, since logging starts before encoding, so the directory may not exist
     /// if we delay.
     fn get_log_path(input_path: &Path, cli: &Cli) -> Result<Option<PathBuf>> {
-        if cli.no_log {
+        if cli.test_opts.no_log {
             Ok(None)
         } else {
             let output_dir = get_output_dir(cli);
