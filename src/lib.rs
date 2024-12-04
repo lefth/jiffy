@@ -2,7 +2,7 @@ use std::{
     cmp::max,
     collections::VecDeque,
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::remove_file,
     future::Future,
     io::Write,
@@ -18,7 +18,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{ArgAction, Args, Parser};
 use futures::stream::{FuturesUnordered, StreamExt};
-use globset::{Glob, GlobSetBuilder};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use lexical_sort;
 #[allow(unused_imports)]
 use log::*;
@@ -360,21 +360,15 @@ struct EncodingErr(PathBuf, String);
 
 pub struct Encoder {
     cli: Arc<Cli>,
-    exclude_as_paths: Vec<PathBuf>,
-    include_as_paths: Vec<PathBuf>,
     ffmpeg_path: OsString,
     video_root: PathBuf,
 }
 
 impl Encoder {
     pub fn new(cli: Cli) -> Result<Encoder> {
-        let exclude_as_paths = cli.exclude.iter().map(PathBuf::from).collect();
-        let include_as_paths = cli.include.iter().map(PathBuf::from).collect();
         return Ok(Encoder {
             video_root: cli.video_root.clone(),
             cli: Arc::new(cli),
-            exclude_as_paths,
-            include_as_paths,
             ffmpeg_path: find_executable(Executable::FFMPEG)?,
         });
     }
@@ -816,24 +810,48 @@ impl Encoder {
         }
     }
 
+    pub fn is_match<P>((globset, paths): &(GlobSet, Vec<PathBuf>), path: P) -> bool
+    where
+        P: AsRef<Path>,
+        PathBuf: From<P>,
+    {
+        let path = PathBuf::from(path);
+        globset.is_match(&path) || paths.iter().any(|p| is_same_file(p, &path))
+    }
+
+    pub fn get_matcher_from_globs<P>(
+        video_root: P,
+        inputs: &Vec<String>,
+        allow_empty: bool,
+    ) -> Option<(GlobSet, Vec<PathBuf>)>
+    where
+        P: AsRef<Path> + AsRef<OsStr>,
+    {
+        if inputs.len() == 0 && !allow_empty {
+            return None;
+        }
+
+        let mut paths = vec![];
+        let mut globset = GlobSetBuilder::new();
+        let video_root = PathBuf::from(&video_root);
+
+        for input in inputs {
+            // interpret x.mp4 as a glob only if video_root/x.mp4 does not exist
+            let as_path = Path::join(&video_root, input);
+            if as_path.exists() {
+                paths.push(as_path);
+            } else {
+                globset.add(Glob::new(&input).expect("Could not build glob pattern"));
+            }
+        }
+        Some((globset.build().expect("Could not build glob set."), paths))
+    }
+
     /// Get the paths of all videos in the parent directory, excluding those in this directory.
     /// (This directory is considered the encode directory.)
     async fn get_video_paths(&self) -> Result<Vec<InputFile>> {
-        let mut exclude = GlobSetBuilder::new();
-        for pattern in &self.cli.exclude {
-            exclude.add(Glob::new(&pattern)?);
-        }
-        let exclude = exclude.build()?;
-
-        let include = if self.cli.include.is_empty() {
-            None
-        } else {
-            let mut include = GlobSetBuilder::new();
-            for pattern in &self.cli.include {
-                include.add(Glob::new(&pattern)?);
-            }
-            Some(include.build()?)
-        };
+        let exclude = Self::get_matcher_from_globs(&self.video_root, &self.cli.exclude, true);
+        let include = Self::get_matcher_from_globs(&self.video_root, &self.cli.include, false);
 
         let video_re = Regex::new(
             r"^mp4|mkv|m4v|vob|ogg|ogv|wmv|yuv|y4v|mpg|mpeg|3gp|3g2|f4v|f4p|avi|webm|flv$",
@@ -864,33 +882,19 @@ impl Encoder {
                 let matchable_path = relative_path.unwrap_or(fname.clone());
 
                 if let Some(include) = &include {
-                    if !include.is_match(&matchable_path) {
-                        if self
-                            .include_as_paths
-                            .iter()
-                            .any(|incl| is_same_file(incl, &matchable_path))
-                        {
-                            log::warn!("Path did not match an include pattern, but did match exactly. Including: {fname:?}");
-                        } else {
-                            log::debug!(
-                                "Skipping path because it's not an included path: {fname:?}"
-                            );
-                            continue;
-                        }
+                    if !Self::is_match(&include, &matchable_path) {
+                        log::debug!("Skipping path because it's not an included path: {fname:?}");
+                        continue;
                     }
                 }
 
                 if is_same_file(&fname, &encode_dir) {
                     continue;
-                } else if exclude.is_match(&matchable_path) {
-                    log::debug!("Skipping path because of exclude: {fname:?}");
-                    continue;
-                } else if self
-                    .exclude_as_paths
-                    .iter()
-                    .any(|incl| is_same_file(incl, &matchable_path))
+                } else if exclude
+                    .as_ref()
+                    .map_or(false, |x| Self::is_match(&x, &matchable_path))
                 {
-                    log::warn!("Path did not match an exclude as a pattern, but did match exactly. Excluding: {fname:?}");
+                    log::debug!("Skipping path because of exclude: {fname:?}");
                     continue;
                 }
 
@@ -1065,13 +1069,19 @@ fn extension_matches(fname: &Path, video_re: &Regex) -> Result<bool> {
     return Ok(false);
 }
 
-fn is_same_file(pattern: &Path, matchable_path: &Path) -> bool {
+fn is_same_file<P>(pattern: P, matchable_path: P) -> bool
+where
+    P: AsRef<Path> + std::fmt::Debug,
+{
+    let pattern: &Path = pattern.as_ref();
+    let matchable_path: &Path = matchable_path.as_ref();
+
     // FIXME: this might not work with non-local paths, like jiffy /tmp/vids --exclude /tmp/vids/foo.mp4
     // or jiffy vids --exclude vids/foo.mp4
     debug!("Comparing paths: {:?} and {:?}", pattern, matchable_path);
 
-    if let Ok(canonical_pattern) = pattern.canonicalize() {
-        if let Ok(canonical_path) = matchable_path.canonicalize() {
+    if let Ok(canonical_pattern) = std::fs::canonicalize(pattern) {
+        if let Ok(canonical_path) = std::fs::canonicalize(matchable_path) {
             debug!(
                 "Paths' canonical forms are equal: {}",
                 canonical_path == canonical_pattern

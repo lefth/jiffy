@@ -203,3 +203,21 @@ async fn test_output_fname() {
         "/a/encoded/vid-crf8.mkv"
     );
 }
+
+#[test]
+#[should_panic(expected = "Could not build glob pattern")]
+fn test_include_bad_glob() {
+    Encoder::get_matcher_from_globs(".", &vec!["a -!｜：([]).mp4".to_string()], true);
+}
+
+#[test]
+fn test_include_bad_glob_okay_if_exists() {
+    let path = "b -!｜：([]).mp4".to_string();
+    std::fs::File::create(&path).expect("Could not create test file");
+    let matcher = Encoder::get_matcher_from_globs(".", &vec![path.clone()], true)
+        .expect("Could not create matcher");
+
+    // make sure it is matched:
+    assert!(Encoder::is_match(&matcher, &path));
+    std::fs::remove_file(&path).expect("Could not remove test file");
+}
