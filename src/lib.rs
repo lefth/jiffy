@@ -51,7 +51,7 @@ pub struct Cli {
     #[clap(long)]
     pub crf: Option<u8>,
 
-    /// Use x265 instead of aom-av1. This is true by default with --animation.
+    /// Use x265 instead of aom-av1. This is the default.
     #[clap(long, alias = "h265", conflicts_with_all = ["av1", "reference"])]
     pub x265: bool,
 
@@ -59,7 +59,7 @@ pub struct Cli {
     #[clap(long, conflicts_with_all = ["av1", "x265"])]
     pub reference: bool,
 
-    /// Use libaom-av1 for encoding. This is the default, except for animation.
+    /// Use libaom-av1 for encoding.
     #[clap(long = "av1", aliases = ["aom", "libaom", "aom-av1"])]
     pub av1: bool,
 
@@ -111,9 +111,9 @@ pub struct Cli {
     #[clap(
         long,
         hide_default_value = true,
-        default_value = "5",
+        default_value = "slow",
         default_value_if("reference", "true", "veryfast"),
-        default_value_if("x265", "true", "slow"),
+        default_value_if("av1", "true", "5"),
         default_value_if("for_tv", "true", "fast")
     )]
     pub preset: String,
@@ -251,7 +251,7 @@ impl Cli {
             Codec::Copy
         } else if self.reference || self.for_tv {
             Codec::H264
-        } else if !self.x265 && (self.av1 || !self.anime) {
+        } else if self.av1 {
             Codec::Av1
         } else {
             Codec::H265

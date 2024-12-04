@@ -54,7 +54,7 @@ async fn test_output_directory() {
         .unwrap();
     assert_paths_eq!(
         input.get_output_path(None).unwrap(),
-        "encoded/a/b/vid.en-5-crf24.mp4"
+        "encoded/a/b/vid.en-crf22.mp4"
     );
 }
 
@@ -77,7 +77,7 @@ async fn test_input_output_directories() {
             let input = InputFile::new(input_path, args).await.unwrap();
             assert_paths_eq!(
                 input.get_output_path(None).unwrap(),
-                "encoded/vid.en-5-crf24.mp4"
+                "encoded/vid.en-crf22.mp4"
             );
         }
     }
@@ -96,7 +96,7 @@ async fn test_absolute_output_directory() {
         .unwrap();
     assert_paths_eq!(
         input.get_output_path(None).unwrap(),
-        "/home/x/encoded/a/b/vid.en-5-crf24.mp4"
+        "/home/x/encoded/a/b/vid.en-crf22.mp4"
     );
 }
 
@@ -114,7 +114,7 @@ async fn test_input_dir_and_absolute_output_dir() {
         .unwrap();
     assert_paths_eq!(
         input.get_output_path(None).unwrap(),
-        "/home/x/encoded/vid.en-5-crf24.mp4"
+        "/home/x/encoded/vid.en-crf22.mp4"
     );
 }
 

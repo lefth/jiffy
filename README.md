@@ -17,9 +17,9 @@ Options:
       --crf <CRF>                      Set the quality level (for either encoded). The default is 24 for AV1 and 22 for
                                        H265, but if unspecified, a better CRF may be used for small videos, or a lower
                                        quality CRF may be used for animation
-      --x265                           Use x265 instead of aom-av1. This is true by default with --animation
+      --x265                           Use x265 instead of aom-av1. This is the default
       --reference                      Use x264 to make a high quality (high disk space) fast encode
-      --av1                            Use libaom-av1 for encoding. This is the default, except for animation
+      --av1                            Use libaom-av1 for encoding
       --animation                      Use settings that work well for anime or animation
       --anime-slow-well-lit            Use this setting for slow well lit anime, like slice of life:
       --anime-mixed-dark-battle        Use this setting for anime with some dark scenes, some battle scenes (shonen,

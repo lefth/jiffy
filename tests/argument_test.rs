@@ -8,7 +8,7 @@ fn test_opt_codec() {
     assert_eq!(args.get_video_codec(), Codec::Av1);
 
     let args = &Cli::parse_from(["prog_name"]);
-    assert_eq!(args.get_video_codec(), Codec::Av1);
+    assert_eq!(args.get_video_codec(), Codec::H265);
 
     let args = &Cli::parse_from(["prog_name", "--x265"]);
     assert_eq!(args.get_video_codec(), Codec::H265);
@@ -62,12 +62,14 @@ fn test_preset() -> Result<()> {
     let args = &Cli::parse_from(["prog_name"]);
     assert_eq!(args.x265, false);
     assert_eq!(args.eight_bit, false);
-    assert_eq!(args.preset, "5");
+    assert_eq!(args.preset, "slow");
     let args = &Cli::parse_from(["prog_name", "--preset=3"]);
     assert_eq!(args.preset, "3");
     let args = &Cli::parse_from(["prog_name", "--for-tv"]);
     assert_eq!(args.preset, "fast");
     assert_eq!(args.eight_bit, true);
+    let args = &Cli::parse_from(["prog_name", "--av1"]);
+    assert_eq!(args.preset, "5");
     let args = &Cli::parse_from(["prog_name", "--x265"]);
     assert_eq!(args.preset, "slow");
 
