@@ -376,10 +376,12 @@ impl Encoder {
     pub async fn encode_videos(&self) -> Result<()> {
         let (failure_tx, failures) = channel();
         let input_files = self.get_video_paths().await?;
+        let task_count = input_files.len();
         let mut tasks_not_started = input_files
             .iter()
-            .map(|input_file| {
-                let job = self.encode_video(input_file, failure_tx.clone());
+            .enumerate()
+            .map(|(i, input_file)| {
+                let job = self.encode_video(input_file, failure_tx.clone(), i, task_count);
                 Box::pin(job) as Pin<Box<dyn Future<Output = _>>>
             })
             .collect::<VecDeque<_>>();
@@ -390,6 +392,7 @@ impl Encoder {
             let running_ffmpeg = sysinfo
                 .processes_by_exact_name("ffmpeg".as_ref())
                 .collect::<Vec<_>>();
+            debug!("Running ffmpeg processes: {}", running_ffmpeg.len());
             if running_ffmpeg.len() > 0 {
                 info!(
                     "Starting slow while {} ffmpeg processes finish",
@@ -402,6 +405,8 @@ impl Encoder {
                     )));
                 }
             }
+        } else {
+            debug!("Slow start?: false");
         }
 
         let mut tasks_started = FuturesUnordered::new();
@@ -442,9 +447,11 @@ impl Encoder {
         &self,
         input: &InputFile,
         failure_tx: Sender<(PathBuf, String)>,
+        i: usize,
+        total: usize,
     ) -> Result<(), EncodingErr> {
         let input_path = input.path.clone();
-        if let Err(err) = self.encode_video_inner(input, failure_tx).await {
+        if let Err(err) = self.encode_video_inner(input, failure_tx, i, total).await {
             return Err(EncodingErr(input_path, format!("{err:?}")));
         }
         Ok(())
@@ -455,6 +462,8 @@ impl Encoder {
         &self,
         input: &InputFile,
         failure_tx: Sender<(PathBuf, String)>,
+        i: usize,
+        total: usize,
     ) -> Result<()> {
         let output_path = input.get_output_path(self.cli.output_name.clone())?;
         let parent = output_path
@@ -649,7 +658,7 @@ impl Encoder {
         child_args.extend(os_args![&partial_output_path]);
 
         _info!(input, "");
-        _info!(input, "Executing: {:?} {:?}", &self.ffmpeg_path, child_args);
+        _info!(input, "Executing: {:?} {:?}\n(file {}/{})", &self.ffmpeg_path, child_args, i + 1, total);
         _info!(input, "");
 
         let mut program = Command::new(&self.ffmpeg_path);
@@ -951,13 +960,17 @@ impl Encoder {
 }
 
 async fn wait_for_process(pid: sysinfo::Pid, name: OsString) -> Result<(), EncodingErr> {
+    trace!("Wait for process starting ({pid})");
     loop {
         let sysinfo = System::new_all();
-        if matches!(sysinfo.process(pid), Some(process) if process.name() == name && process.status() == ProcessStatus::Run)
-        {
+        let process = sysinfo.process(pid);
+        // TODO: let this end if the rest of the jobs have finished, so the program can exit.
+        trace!("Process {pid}: {name:?}, {:?}, {:?}", process.map(|process| process.name()), process.map(|process| process.status())); // expected and actual name, and status
+        if matches!(process, Some(process) if process.name() == name && !matches!(process.status(), ProcessStatus::Stop | ProcessStatus::Zombie | ProcessStatus::Dead)) {
             info!("Waiting for process: {pid}: {name:?}");
             sleep(Duration::from_millis(10000)).await;
         } else {
+            trace!("Wait for process done ({pid})");
             break;
         }
     }
