@@ -43,7 +43,7 @@ pub enum Codec {
 }
 
 // TODO: the encode dir is unnecessary if both --include and -o are specified
-#[derive(Parser)]
+#[derive(Parser, Default)]
 pub struct Cli {
     /// Set the quality level (for either encoded). The default is 24 for AV1 and 22 for H265, but
     /// if unspecified, a better CRF may be used for small videos, or a lower quality CRF may be
@@ -199,7 +199,7 @@ pub struct Cli {
     pub test_opts: TestOpts,
 }
 
-#[derive(Args)]
+#[derive(Args, Default)]
 #[group(required = false, multiple = true)]
 pub struct TestOpts {
     /// Run through all logic except invoking ffmpeg.
@@ -358,6 +358,7 @@ enum Executable {
 
 struct EncodingErr(PathBuf, String);
 
+#[derive(Default)]
 pub struct Encoder {
     cli: Arc<Cli>,
     ffmpeg_path: OsString,
@@ -666,11 +667,12 @@ impl Encoder {
         if let Some(ref log_path) = input.log_path {
             input.create_log_directory()?;
             let mut ffreport = OsString::from("file=");
-            // ':' and '\' must be escaped:
+            // ':', '\', and ' must be escaped:
             let lossy_logpath = log_path.to_string_lossy();
-            if lossy_logpath.contains(':') || lossy_logpath.contains(r"\") {
+            if lossy_logpath.contains(':') || lossy_logpath.contains(':') || lossy_logpath.contains(r"\") {
                 let lossy_logpath = lossy_logpath.replace(r"\", r"\\");
                 let lossy_logpath = lossy_logpath.replace(":", r"\:");
+                let lossy_logpath = lossy_logpath.replace("'", r"\'");
                 ffreport.push(lossy_logpath);
             } else {
                 // It's preferable to not use lossy decoding unless characters need to be replaced:
@@ -819,13 +821,16 @@ impl Encoder {
         }
     }
 
-    pub fn is_match<P>((globset, paths): &(GlobSet, Vec<PathBuf>), path: P) -> bool
+    pub fn is_match<P>(&self, (globset, paths): &(GlobSet, Vec<PathBuf>), path: P) -> bool
     where
         P: AsRef<Path>,
         PathBuf: From<P>,
     {
         let path = PathBuf::from(path);
-        globset.is_match(&path) || paths.iter().any(|p| is_same_file(p, &path))
+        globset.is_match(&path) || paths.iter().any(|p|
+            is_same_file(p, &path)
+            || is_same_file(p, &Path::join(&self.video_root, &path))
+        )
     }
 
     pub fn get_matcher_from_globs<P>(
@@ -845,12 +850,19 @@ impl Encoder {
         let video_root = PathBuf::from(&video_root);
 
         for input in inputs {
-            // interpret x.mp4 as a glob only if video_root/x.mp4 does not exist
-            let as_path = Path::join(&video_root, input);
+            // Interpret "video_root/x.mp4" or "x.mp4" as a glob only if video_root/x.mp4 does not exist.
+            // This loose interpretation is more convenient than being strict about the path only being
+            // relative to the video root.
+            let as_path = PathBuf::from(input);
             if as_path.exists() {
                 paths.push(as_path);
             } else {
-                globset.add(Glob::new(&input).expect("Could not build glob pattern"));
+                let as_path = Path::join(&video_root, input);
+                if as_path.exists() {
+                    paths.push(as_path);
+                } else {
+                    globset.add(Glob::new(&input).expect("Could not build glob pattern"));
+                }
             }
         }
         Some((globset.build().expect("Could not build glob set."), paths))
@@ -891,7 +903,7 @@ impl Encoder {
                 let matchable_path = relative_path.unwrap_or(fname.clone());
 
                 if let Some(include) = &include {
-                    if !Self::is_match(&include, &matchable_path) {
+                    if !self.is_match(&include, &matchable_path) {
                         log::debug!("Skipping path because it's not an included path: {fname:?}");
                         continue;
                     }
@@ -901,7 +913,7 @@ impl Encoder {
                     continue;
                 } else if exclude
                     .as_ref()
-                    .map_or(false, |x| Self::is_match(&x, &matchable_path))
+                    .map_or(false, |x| self.is_match(&x, &matchable_path))
                 {
                     log::debug!("Skipping path because of exclude: {fname:?}");
                     continue;
@@ -1089,8 +1101,6 @@ where
     let pattern: &Path = pattern.as_ref();
     let matchable_path: &Path = matchable_path.as_ref();
 
-    // FIXME: this might not work with non-local paths, like jiffy /tmp/vids --exclude /tmp/vids/foo.mp4
-    // or jiffy vids --exclude vids/foo.mp4
     debug!("Comparing paths: {:?} and {:?}", pattern, matchable_path);
 
     if let Ok(canonical_pattern) = std::fs::canonicalize(pattern) {
@@ -1102,7 +1112,11 @@ where
             if canonical_path == canonical_pattern {
                 return true;
             }
+        } else {
+            trace!("Could not canonicalize: {:?}", matchable_path);
         }
+    } else {
+        trace!("Could not canonicalize: {:?}", pattern);
     }
 
     let pattern_comps = pattern.components();

@@ -218,6 +218,18 @@ fn test_include_bad_glob_okay_if_exists() {
         .expect("Could not create matcher");
 
     // make sure it is matched:
-    assert!(Encoder::is_match(&matcher, &path));
+    assert!(Encoder::default().is_match(&matcher, &path));
     std::fs::remove_file(&path).expect("Could not remove test file");
+}
+
+#[test]
+fn test_include_bad_glob_okay_if_exists2() {
+    let path = r"test/special characters: ()[]'.mp4".to_string();
+    assert!(PathBuf::from(&path).exists(), "Expected preexisting test file was not found: {path}");
+
+    let matcher = Encoder::get_matcher_from_globs(".", &vec![path.clone()], true)
+        .expect("Could not create matcher");
+
+    // make sure it is matched:
+    assert!(Encoder::default().is_match(&matcher, &path));
 }
