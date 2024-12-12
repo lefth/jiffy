@@ -1,18 +1,9 @@
 use std::{
-    cmp::max,
-    collections::VecDeque,
-    env,
-    ffi::{OsStr, OsString},
-    fs::remove_file,
-    future::Future,
-    io::Write,
-    path::{Path, PathBuf},
-    pin::Pin,
-    sync::{
+    cmp::max, collections::{HashSet, VecDeque}, env, ffi::{OsStr, OsString}, fs::remove_file, future::Future, io::Write, path::{Path, PathBuf}, pin::Pin, sync::{
         mpsc::{channel, Sender},
         Arc,
-    },
-    time::Duration,
+        RwLock,
+    }, time::Duration
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -29,7 +20,6 @@ pub use input_file::*;
 pub mod logger;
 #[allow(unused_imports)]
 pub use logger::*;
-use sysinfo::{ProcessStatus, System};
 use tokio::{io::AsyncReadExt, process::Command, select, time::sleep};
 
 pub const ENCODED: &str = "encoded";
@@ -100,10 +90,10 @@ pub struct Cli {
     )]
     pub eight_bit: bool,
 
-    /// Wait for prior ffmpeg jobs to cease, so there are `--jobs` ffmpeg
-    /// processes, not more.  (This does not deal with the case of additional
-    /// external ffmpeg jobs starting after Jiffy launches.)
-    #[clap(long)]
+    /// Wait for other ffmpeg jobs to cease, so there are `--jobs` total ffmpeg
+    /// processes, not more. This allows a jiffy instance to wait for another,
+    /// without needing all its jobs to finish before starting.
+    #[clap(long, aliases = ["slow-start", "global"])]
     pub slow_start: bool,
 
     /// The encoding preset to use--by default this is fairly slow. By default, "5" for libaom,
@@ -145,7 +135,6 @@ pub struct Cli {
     #[clap(long)]
     pub exclude: Vec<String>,
 
-    // FIXME: --include does not take full paths
     /// Paths (usually glob patterns) to be included; all others are excluded. They match from the
     /// video encode root. If `--include` and `--exclude` are both given, only those that are
     /// matched by the include globs and not matched by the exclude globs will be encoded.  See the
@@ -356,6 +345,11 @@ enum Executable {
     FFPROBE,
 }
 
+enum EncodingDone {
+    EncodingDone,
+    WaitTaskDone,
+}
+
 struct EncodingErr(PathBuf, String);
 
 #[derive(Default)]
@@ -363,6 +357,7 @@ pub struct Encoder {
     cli: Arc<Cli>,
     ffmpeg_path: OsString,
     video_root: PathBuf,
+    finished: RwLock<bool>,
 }
 
 impl Encoder {
@@ -371,43 +366,30 @@ impl Encoder {
             video_root: cli.video_root.clone(),
             cli: Arc::new(cli),
             ffmpeg_path: find_executable(Executable::FFMPEG)?,
+            finished: Default::default(),
         });
     }
 
     pub async fn encode_videos(&self) -> Result<()> {
-        let (failure_tx, failures) = channel();
+        let (warning_tx, failures) = channel();
         let input_files = self.get_video_paths().await?;
         let task_count = input_files.len();
+        let mut finished_encode_count = 0;
         let mut tasks_not_started = input_files
             .iter()
             .enumerate()
             .map(|(i, input_file)| {
-                let job = self.encode_video(input_file, failure_tx.clone(), i, task_count);
+                let job = self.encode_video(input_file, warning_tx.clone(), i, task_count);
                 Box::pin(job) as Pin<Box<dyn Future<Output = _>>>
             })
             .collect::<VecDeque<_>>();
 
-        if self.cli.slow_start {
-            // FIXME: is this ffmpeg.exe on windows?
-            let sysinfo = sysinfo::System::new_all();
-            let running_ffmpeg = sysinfo
-                .processes_by_exact_name("ffmpeg".as_ref())
-                .collect::<Vec<_>>();
-            debug!("Running ffmpeg processes: {}", running_ffmpeg.len());
-            if running_ffmpeg.len() > 0 {
-                info!(
-                    "Starting slow while {} ffmpeg processes finish",
-                    running_ffmpeg.len()
-                );
-                for process in running_ffmpeg {
-                    tasks_not_started.push_front(Box::pin(wait_for_process(
-                        process.pid(),
-                        process.name().to_os_string(),
-                    )));
-                }
-            }
-        } else {
-            debug!("Slow start?: false");
+        // Start with JOBS tasks waiting for existing ffmpeg processes, unless
+        // we aren't waiting. They don't all need to wait; it depends on the
+        // number of ffmpeg processes compared to the number of jobs.
+        let wait_count = if self.cli.slow_start { self.cli.get_jobs()? } else { 0 };
+        for job_id in 0..wait_count {
+            tasks_not_started.push_front(Box::pin(self.wait_for_ffmpeg(job_id)));
         }
 
         let mut tasks_started = FuturesUnordered::new();
@@ -421,9 +403,23 @@ impl Encoder {
         log::trace!("Will start jobs (concurrently)");
         while let Some(finished_task) = tasks_started.next().await {
             log::trace!("Popped a finished a task into the job list (not started)");
-            if let Err(EncodingErr(path, msg)) = finished_task {
-                failure_tx.send((path, msg))?;
+            match finished_task {
+                Err(EncodingErr(path, msg)) => {
+                    finished_encode_count += 1;
+                    warning_tx.send((path, msg))?;
+                }
+                Ok(EncodingDone::EncodingDone) => {
+                    finished_encode_count += 1;
+                }
+                _ => (),
             }
+
+            if finished_encode_count == task_count {
+                log::debug!("All encode tasks are complete");
+                let finished_writer = self.finished.write();
+                *finished_writer.expect("Could not get writer to mark tasks finished") = true;
+            }
+
             if let Some(next_task) = tasks_not_started.pop_front() {
                 log::trace!("Pushing another job to be run concurrently");
                 tasks_started.push(next_task);
@@ -447,22 +443,22 @@ impl Encoder {
     async fn encode_video(
         &self,
         input: &InputFile,
-        failure_tx: Sender<(PathBuf, String)>,
+        warning_tx: Sender<(PathBuf, String)>,
         i: usize,
         total: usize,
-    ) -> Result<(), EncodingErr> {
+    ) -> Result<EncodingDone, EncodingErr> {
         let input_path = input.path.clone();
-        if let Err(err) = self.encode_video_inner(input, failure_tx, i, total).await {
+        if let Err(err) = self.encode_video_inner(input, warning_tx, i, total).await {
             return Err(EncodingErr(input_path, format!("{err:?}")));
         }
-        Ok(())
+        Ok(EncodingDone::EncodingDone)
     }
 
     /// Multiple failure messages may be sent along the tx.
     async fn encode_video_inner(
         &self,
         input: &InputFile,
-        failure_tx: Sender<(PathBuf, String)>,
+        warning_tx: Sender<(PathBuf, String)>,
         i: usize,
         total: usize,
     ) -> Result<()> {
@@ -517,7 +513,7 @@ impl Encoder {
         if self.cli.for_tv {
             if input.contains_subtitle().await? {
                 if let Err(err) = add_subtitles(input, &mut vf).await {
-                    failure_tx.send((
+                    warning_tx.send((
                         input.path.to_owned(),
                         format!("Error adding subtitles: {err:?}"),
                     ))?;
@@ -565,14 +561,14 @@ impl Encoder {
             child_args.extend(os_args!["-y"]);
         } else if output_path.exists() || partial_output_path.exists() {
             if output_path.exists() {
-                failure_tx.send((
+                warning_tx.send((
                     output_path.to_owned(),
                     format!("Output file already exists: {output_path:?}"),
                 ))?;
             }
             // This may indicate an encode process is already running for that file:
             if partial_output_path.exists() {
-                failure_tx.send((
+                warning_tx.send((
                     partial_output_path.to_owned(),
                     format!("Partial output file already exists: {partial_output_path:?}"),
                 ))?;
@@ -731,10 +727,10 @@ impl Encoder {
                     }
                     // This error is significant enough to show right away, not just at the end:
                     _warn!(input, "{:?}: {}", input.path, msg);
-                    failure_tx.send((input.path.to_owned(), msg)).unwrap();
+                    warning_tx.send((input.path.to_owned(), msg)).unwrap();
                 }
 
-                self.check_encoded_size(orig_size, input.path.clone(), output_path, failure_tx)?;
+                self.check_encoded_size(orig_size, input.path.clone(), output_path, warning_tx)?;
                 break;
             }
         }
@@ -936,11 +932,11 @@ impl Encoder {
         orig_size: u64,
         input_path: PathBuf,
         output_path: PathBuf,
-        failure_tx: Sender<(PathBuf, String)>,
+        warning_tx: Sender<(PathBuf, String)>,
     ) -> Result<()> {
         let size = get_file_size(&output_path).context("Could not get file size after encoding")?;
         if size < 300 {
-            failure_tx
+            warning_tx
                 .send((
                     input_path,
                     format!("Deleting {size} byte output file: {output_path:?}"),
@@ -954,40 +950,84 @@ impl Encoder {
         if let Some(expected_size) = self.cli.expected_size {
             if percent > expected_size.into() {
                 if self.cli.delete_too_large {
-                    failure_tx.send((input_path, format!("Deleting too large output file (too large at {percent}%): {output_path:?}"))).unwrap();
+                    warning_tx.send((input_path, format!("Deleting too large output file (too large at {percent}%): {output_path:?}"))).unwrap();
                     remove_file(output_path)?;
                 } else {
-                    failure_tx.send((input_path, format!("Output file was larger than expected at {percent}%: {output_path:?}"))).unwrap();
+                    warning_tx.send((input_path, format!("Output file was larger than expected at {percent}%: {output_path:?}"))).unwrap();
                 }
             } else if percent < (expected_size / 3).into() {
-                failure_tx.send((input_path, format!("Output file was much smaller than expected at {percent}%: {output_path:?}"))).unwrap();
+                warning_tx.send((input_path, format!("Output file was much smaller than expected at {percent}%: {output_path:?}"))).unwrap();
             } else if percent > 100 && self.cli.delete_too_large {
-                failure_tx.send((input_path, format!("Deleting output file larger than the original ({percent}%): {output_path:?}"))).unwrap();
+                warning_tx.send((input_path, format!("Deleting output file larger than the original ({percent}%): {output_path:?}"))).unwrap();
                 remove_file(output_path)?;
             }
         }
 
         return Ok(());
     }
-}
 
-async fn wait_for_process(pid: sysinfo::Pid, name: OsString) -> Result<(), EncodingErr> {
-    trace!("Wait for process starting ({pid})");
-    loop {
-        let sysinfo = System::new_all();
-        let process = sysinfo.process(pid);
-        // TODO: let this end if the rest of the jobs have finished, so the program can exit.
-        trace!("Process {pid}: {name:?}, {:?}, {:?}", process.map(|process| process.name()), process.map(|process| process.status())); // expected and actual name, and status
-        if matches!(process, Some(process) if process.name() == name && !matches!(process.status(), ProcessStatus::Stop | ProcessStatus::Zombie | ProcessStatus::Dead)) {
-            info!("Waiting for process: {pid}: {name:?}");
-            sleep(Duration::from_millis(10000)).await;
-        } else {
-            trace!("Wait for process done ({pid})");
-            break;
+    async fn wait_for_ffmpeg(&self, job_id: usize) -> Result<EncodingDone, EncodingErr> {
+        fn get_running_ffmpeg() -> HashSet<sysinfo::Pid> {
+            let this_process = std::process::id();
+
+            let sysinfo = sysinfo::System::new_all();
+            sysinfo
+                .processes_by_exact_name("ffmpeg".as_ref())
+                .filter(|process| {
+                    let mut process = *process;
+                    loop {
+                        let parent_pid = process.parent();
+                        if let Some(parent_pid) = parent_pid {
+                            if parent_pid.as_u32() == this_process {
+                                // This is not a ffmpeg we would wait for
+                                return false;
+                            }
+
+                            if let Some(parent) = sysinfo.process(parent_pid) {
+                                // Continue checking
+                                process = parent;
+                                continue;
+                            }
+                        }
+                        // There are no more parents
+                        return true;
+                    }
+                })
+                .map(|process| process.pid())
+                .collect()
         }
-    }
 
-    Ok(())
+        let mut running_ffmpegs = get_running_ffmpeg();
+        loop {
+            if *self.finished.read().expect("Could not get reader to check if encoding is finished") {
+                log::trace!("Encoding is finished, so we won't wait for ffmpeg anymore");
+                break;
+            }
+
+            // Note: job 0 waits for JOBS-1 external ffmpegs to be running so the global total will be right,
+            // job 1 waits for JOBS-2 processes to be running...
+            let jobs = self.cli.get_jobs().expect("Jobs should be set by now");
+            let allowed = jobs - 1 - job_id;
+            let too_many = running_ffmpegs.len() as i32 - allowed as i32;
+            debug!("{} ffmpeg processes too many to start job {}", too_many, job_id);
+            if too_many <= 0 {
+                trace!("Not too many ffmpeg processes. Will wait and see if that's a final count. (job {job_id})");
+                // not too many, but check again to be sure new processes aren't
+                // still being spawned:
+                sleep(Duration::from_millis(10_000)).await;
+                let new_ffmpegs = get_running_ffmpeg();
+                if new_ffmpegs.is_subset(&running_ffmpegs) {
+                    trace!("The process count is stable. (job {job_id})");
+                    break; // no new ffmpeg process started
+                }
+                trace!("The process count is still changing. (job {job_id})");
+
+                running_ffmpegs = new_ffmpegs;
+            }
+            sleep(Duration::from_millis(10_000)).await;
+        }
+        Ok(EncodingDone::WaitTaskDone)
+    }
 }
 
 pub fn parse_size(input: &str) -> Result<u64> {
