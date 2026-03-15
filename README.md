@@ -86,13 +86,10 @@ Debug options:
 
 ### Environment variables
 
-Extra flags for ffmpeg can also be passed in the `FFMPEG_FLAGS` environment variable.
-Per-video flags can be set as well, so settings per video will be remembered. (It is
-best to store these files in a wrapper for `jiffy` so as to not pollute your
-shell init with video configurations.)
+Extra flags for ffmpeg can be set per-video in an environment variable:
+`FFMPEG_video_name` and `VF_video_name` for general ffmpeg arguments
+and `-vf` arguments, respectively.
 
-The video-specific environment variables can be `FFMPEG_video_name` and `VF_video_name` for general ffmpeg
-flags and `-vf` flags respectively.
 Note that non-alphanumeric characters and leading numbers should be replaced by "_". Examples:
 
 ```

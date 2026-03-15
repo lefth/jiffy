@@ -489,6 +489,28 @@ impl Encoder {
         i: usize,
         total: usize,
     ) -> Result<()> {
+        // Parse environment variables for ffmpeg for this file
+        let mut early_flags_from_env = vec![];
+        let mut flags_from_env = vec![];
+        if let Some(env_ffmpeg_args) = input.env_ffmpeg_args()? {
+            let env_ffmpeg_args = env_ffmpeg_args
+                .split_whitespace()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            let mut next_is_early = false;
+            for arg in env_ffmpeg_args {
+                if next_is_early {
+                    early_flags_from_env.push(arg.clone());
+                    next_is_early = false;
+                } else if arg == "-ss" {
+                    next_is_early = true;
+                    early_flags_from_env.push(arg);
+                } else {
+                    flags_from_env.push(arg.clone());
+                }
+            }
+        }
+
         let output_path = input.get_output_path(self.cli.output_name.clone())?;
         let parent = output_path
             .parent()
@@ -501,10 +523,13 @@ impl Encoder {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Normal args for ffmpeg:
-        let mut child_args = os_args!["-i", &input.path, "-hide_banner"];
+        // All args for ffmpeg:
+        let mut child_args = vec![];
 
         child_args.extend(self.cli.get_extra_early_flags()?.iter().map(|s| s.into()));
+        child_args.extend(early_flags_from_env);
+
+        child_args.extend(os_args!["-i", &input.path, "-hide_banner"]);
 
         // Options for -vf:
         let mut vf = Vec::<OsString>::new();
@@ -663,24 +688,9 @@ impl Encoder {
             child_args.extend(os_args!["-vf", &vf]);
         }
 
-        // Add other args specific to this filename
-        if let Some(env_ffmpeg_args) = input.env_ffmpeg_args()? {
-            child_args.extend(env_ffmpeg_args.split_whitespace().map(OsString::from));
-        }
+        child_args.extend(flags_from_env);
 
         child_args.extend(self.cli.get_extra_normal_flags()?.iter().map(|s| s.into()));
-        match env::var("FFMPEG_FLAGS") {
-            Ok(env_args) => {
-                child_args.extend(env_args.to_string().split_whitespace().map(|s| s.into()));
-            }
-            Err(env::VarError::NotPresent) => {}
-            Err(err) => {
-                _warn!(
-                    input,
-                    "Could not get extra ffmpeg args from FFMPEG_FLAGS: {err}"
-                );
-            }
-        }
 
         child_args.extend(os_args![&partial_output_path]);
 
