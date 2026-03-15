@@ -98,10 +98,11 @@ fn test_extra_flags() -> Result<()> {
         "--extra-flag=-vf bwdif",
     ]);
 
-    let expected_extra_flags = ["-ss", "30", "-t", "5:00"].into_iter().collect::<Vec<_>>();
+    let expected_early_flags = ["-ss", "30"].into_iter().collect::<Vec<_>>();
+    let expected_extra_flags = ["-t", "5:00"].into_iter().collect::<Vec<_>>();
     let expected_extra_vf_flags = ["hflip", "bwdif"].into_iter().collect::<Vec<_>>();
 
-    assert_eq!(args.get_extra_normal_flags()?, expected_extra_flags);
+    assert_eq!(args.get_extra_early_flags()?, expected_early_flags);
     assert_eq!(args.get_extra_vf_flags()?, expected_extra_vf_flags);
     assert_eq!(args2.get_extra_normal_flags()?, expected_extra_flags);
     assert_eq!(args2.get_extra_vf_flags()?, expected_extra_vf_flags);

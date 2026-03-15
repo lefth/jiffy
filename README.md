@@ -70,12 +70,13 @@ Debug options:
       --copy-audio                     Keep the audio stream unchanged. This is useful if audio bitrate can't be
                                        determined
       --copy-streams                   Copy audio and video streams (don't encode). Used for testing, for example
-                                       passing `--copy-streams --extra-flag='-to 30'` would copy a 30 second from each
+                                       passing `--copy-streams --extra-arg='-to 30'` would copy a 30 second from each
                                        video. Implies `--copy-audio`
       --no-audio                       For testing and benchmarking
-      --extra-flag <EXTRA_FLAG>        Add additional ffmpeg flags, such as "-to 5:00" to quickly test the first few
+      --extra-arg <EXTRA_arg>          Add additional ffmpeg arg, such as "-to 5:00" to quickly test the first few
                                        minutes of a file.  Each option should be passed separately, for example: `jiffy
-                                       --extra-flag='-ss 30' --extra-flag='-t 5:00'`
+                                       --extra-arg='-ss 30' --extra-arg='-t 5:00'`. As a special case, if `-ss <start time>`
+                                       is found, it will be passed to ffmpeg before the input filename.
   -n, --no-log                         Don't write log files for each ffmpeg invocation. This avoids polluting your
                                        output directory with a log file per input
   -q, --quiet...                       Can specify -q -q (-qq) to make the program ever more quiet

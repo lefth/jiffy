@@ -1,9 +1,18 @@
 use std::{
-    cmp::max, collections::{HashSet, VecDeque}, env, ffi::{OsStr, OsString}, fs::remove_file, future::Future, io::Write, path::{Path, PathBuf}, pin::Pin, sync::{
+    cmp::max,
+    collections::{HashSet, VecDeque},
+    env,
+    ffi::{OsStr, OsString},
+    fs::remove_file,
+    future::Future,
+    io::Write,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::{
         mpsc::{channel, Sender},
-        Arc,
-        RwLock,
-    }, time::Duration
+        Arc, RwLock,
+    },
+    time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -204,7 +213,7 @@ pub struct TestOpts {
     pub copy_audio: bool,
 
     /// Copy audio and video streams (don't encode). Used for testing, for example passing
-    /// `--copy-streams --extra-flag='-to 30'` would copy a 30 second from each video. Implies
+    /// `--copy-streams --extra-arg='-to 30'` would copy a 30 second from each video. Implies
     /// `--copy-audio`.
     #[clap(long = "copy-streams", conflicts_with_all = ["av1", "x265", "reference", "for_tv", "height_720p",
         "anime", "anime_mixed_dark_battle", "anime_slow_well_lit", "crf", "preset"])]
@@ -214,11 +223,12 @@ pub struct TestOpts {
     #[clap(long = "no-audio", conflicts_with = "copy_audio")]
     pub no_audio: bool,
 
-    /// Add additional ffmpeg flags, such as "-to 5:00" to quickly test the first few minutes of a
-    /// file.  Each option should be passed separately, for example:
-    /// `jiffy --extra-flag='-ss 30' --extra-flag='-t 5:00'`
-    #[clap(long, allow_hyphen_values(true))]
-    pub extra_flag: Vec<String>,
+    /// Add additional ffmpeg args, such as "-to 5:00" to quickly test the first few minutes of a
+    /// file. Each option should be passed separately, for example:
+    /// `jiffy --extra-arg='-ss 30' --extra-arg='-t 5:00'`. As a special case, if `-ss <start time>`
+    /// is found, it will be passed to ffmpeg before the input filename.
+    #[clap(long, allow_hyphen_values(true), alias = "extra-flag")]
+    pub extra_arg: Vec<String>,
 
     /// Don't write log files for each ffmpeg invocation. This avoids polluting your output
     /// directory with a log file per input.
@@ -270,21 +280,34 @@ impl Cli {
         Ok(jobs)
     }
 
-    fn get_extra_flags(&self) -> Result<Vec<String>> {
+    // Returns early args and late args
+    fn get_extra_flags(&self) -> Result<(Vec<String>, Vec<String>)> {
         let whitespace_re = Regex::new(r"\s+")?;
-        Ok(self
-            .test_opts
-            .extra_flag
-            .iter()
-            .flat_map(|extra_flag| {
-                // Split once on space, or leave as is if there's no space:
-                whitespace_re.splitn(extra_flag, 2).map(String::from)
-            })
-            .collect())
+        let mut args = vec![];
+        let mut early_args = vec![];
+        for extra_flag in self.test_opts.extra_arg.iter() {
+            // Split once on space, or leave as is if there's no space:
+            let split_arg = whitespace_re
+                .splitn(extra_flag, 2)
+                .map(String::from)
+                .collect::<Vec<_>>();
+            // special case: only this argument must go before the input filename
+            if split_arg[0] == "-ss" {
+                early_args.extend(split_arg);
+            } else {
+                args.extend(split_arg);
+            }
+        }
+
+        return Ok((early_args, args));
+    }
+
+    pub fn get_extra_early_flags(&self) -> Result<Vec<String>> {
+        return Ok(self.get_extra_flags()?.0);
     }
 
     pub fn get_extra_normal_flags(&self) -> Result<Vec<String>> {
-        let raw = self.get_extra_flags()?;
+        let raw = self.get_extra_flags()?.1;
         // Combine these to detect -vf and the arg together:
         // [-vf     hflip           ]
         // [        -vf        hflip]
@@ -303,7 +326,7 @@ impl Cli {
     }
 
     pub fn get_extra_vf_flags(&self) -> Result<Vec<String>> {
-        let raw = self.get_extra_flags()?;
+        let raw = self.get_extra_flags()?.1;
         // Combine these to detect -vf and the arg together:
         // [-vf     hflip           ]
         // [        -vf        hflip]
@@ -387,7 +410,11 @@ impl Encoder {
         // Start with JOBS tasks waiting for existing ffmpeg processes, unless
         // we aren't waiting. They don't all need to wait; it depends on the
         // number of ffmpeg processes compared to the number of jobs.
-        let wait_count = if self.cli.slow_start { self.cli.get_jobs()? } else { 0 };
+        let wait_count = if self.cli.slow_start {
+            self.cli.get_jobs()?
+        } else {
+            0
+        };
         for job_id in 0..wait_count {
             tasks_not_started.push_front(Box::pin(self.wait_for_ffmpeg(job_id)));
         }
@@ -476,6 +503,9 @@ impl Encoder {
 
         // Normal args for ffmpeg:
         let mut child_args = os_args!["-i", &input.path, "-hide_banner"];
+
+        child_args.extend(self.cli.get_extra_early_flags()?.iter().map(|s| s.into()));
+
         // Options for -vf:
         let mut vf = Vec::<OsString>::new();
 
@@ -655,7 +685,14 @@ impl Encoder {
         child_args.extend(os_args![&partial_output_path]);
 
         _info!(input, "");
-        _info!(input, "Executing: {:?} {:?}\n(file {}/{})", &self.ffmpeg_path, child_args, i + 1, total);
+        _info!(
+            input,
+            "Executing: {:?} {:?}\n(file {}/{})",
+            &self.ffmpeg_path,
+            child_args,
+            i + 1,
+            total
+        );
         _info!(input, "");
 
         let mut program = Command::new(&self.ffmpeg_path);
@@ -665,7 +702,10 @@ impl Encoder {
             let mut ffreport = OsString::from("file=");
             // ':', '\', and ' must be escaped:
             let lossy_logpath = log_path.to_string_lossy();
-            if lossy_logpath.contains(':') || lossy_logpath.contains(':') || lossy_logpath.contains(r"\") {
+            if lossy_logpath.contains(':')
+                || lossy_logpath.contains(':')
+                || lossy_logpath.contains(r"\")
+            {
                 let lossy_logpath = lossy_logpath.replace(r"\", r"\\");
                 let lossy_logpath = lossy_logpath.replace(":", r"\:");
                 let lossy_logpath = lossy_logpath.replace("'", r"\'");
@@ -823,10 +863,10 @@ impl Encoder {
         PathBuf: From<P>,
     {
         let path = PathBuf::from(path);
-        globset.is_match(&path) || paths.iter().any(|p|
-            is_same_file(p, &path)
-            || is_same_file(p, &Path::join(&self.video_root, &path))
-        )
+        globset.is_match(&path)
+            || paths.iter().any(|p| {
+                is_same_file(p, &path) || is_same_file(p, &Path::join(&self.video_root, &path))
+            })
     }
 
     pub fn get_matcher_from_globs<P>(
@@ -999,7 +1039,11 @@ impl Encoder {
 
         let mut running_ffmpegs = get_running_ffmpeg();
         loop {
-            if *self.finished.read().expect("Could not get reader to check if encoding is finished") {
+            if *self
+                .finished
+                .read()
+                .expect("Could not get reader to check if encoding is finished")
+            {
                 log::trace!("Encoding is finished, so we won't wait for ffmpeg anymore");
                 break;
             }
@@ -1009,7 +1053,10 @@ impl Encoder {
             let jobs = self.cli.get_jobs().expect("Jobs should be set by now");
             let allowed = jobs - 1 - job_id;
             let too_many = running_ffmpegs.len() as i32 - allowed as i32;
-            debug!("{} ffmpeg processes too many to start job {}", too_many, job_id);
+            debug!(
+                "{} ffmpeg processes too many to start job {}",
+                too_many, job_id
+            );
             if too_many <= 0 {
                 trace!("Not too many ffmpeg processes. Will wait and see if that's a final count. (job {job_id})");
                 // not too many, but check again to be sure new processes aren't
